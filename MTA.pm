@@ -11,7 +11,10 @@ use vars qw/
 	$LogToStdout
 	$OnlyOnce
 	$LastChild
+	$TimeStampFrequency
 /;
+
+$TimeStampFrequency = 200; # just under an hour at 17 seconds each
 
 sub CRLF(){
 	"\015\012"
@@ -21,7 +24,7 @@ use Fcntl ':flock'; # import LOCK_* constants
 $interval = 17;
 $AgeBeforeDeferralReport = 4 * 3600; # four hours
 
-$VERSION = '0.06';
+$VERSION = '0.07';
 
 $SIG{CHLD} = 'IGNORE';
 
@@ -44,7 +47,7 @@ sub import{
 $LogToStdout = 1;
 
 {
-my $LogTime;
+my $LogTime = 0;
 
 
 
@@ -78,6 +81,8 @@ END {
 };
 
 sub run(){
+
+	$SIG{ALRM} = sub { die 'TIMEOUT -- caught alarm signal'; };
 
 	-d $basedir
 		or mkdir $basedir,0770
@@ -126,7 +131,11 @@ sub run(){
 
 	# endless top level loop
 	mylog "starting fork-and-wait loop";
+	my $count;
 	for(;;){
+		$count++ % $TimeStampFrequency or
+			mylog(scalar( localtime), $count);
+
 		# new child drops out of the waiting loop
 		$LastChild = fork or last;	
 		if($OnlyOnce){
@@ -282,8 +291,15 @@ use Socket;
 
 sub getresponse($){
 	mylog "sending: [$_[0]]";
-	alarm 60;
-	print SOCK $_[0],CRLF or return undef;
+	alarm 70;
+	eval{	#perl "try"
+		print SOCK $_[0],CRLF or return undef;
+	};
+	if($@){	#perl "catch"
+		mylog $@;
+		return undef;
+	};
+
 	my ($dash,$response) = ('-','');
 	while($dash eq '-'){
 		my $line;
@@ -293,7 +309,13 @@ sub getresponse($){
 		my $more = 1;
 		my $BOL = 1;	# "beginning of line"
 		do {
+	eval{	#perl "try"
 			sysread(SOCK,$letter,1);
+	};
+	if($@){	#perl "catch"
+		mylog $@;
+		return undef;
+	};
 			if ($letter eq "\r" or $letter eq "\n"){
 				$more = $BOL;
 			}else{
@@ -357,7 +379,12 @@ sub attempt{
 
         # expect 220
         alarm 60;
-        $line = <SOCK>;
+        eval { $line = <SOCK>; };
+	if($@){
+		mylog $@;
+		close SOCK;
+		goto TryAgain;
+	};
         mylog "$line";
 	unless($line =~ /^2/){
 		mylog "Weird greeting: [$line]";
@@ -447,11 +474,17 @@ sub attempt{
 		$linecount++;
 		$bytecount += length;
 		chomp;
+		eval{
         	alarm 60;
 		if ($_ eq '.'){
-			print SOCK "..\r\n";
+			print SOCK "..\r\n" or die $!;
 		}else{
-			print SOCK $_,"\r\n";
+			print SOCK $_,"\r\n" or die $!;
+		};
+		};
+		if ($@){
+			mylog $@;
+			goto TryAgain;
 		};
 	};
 	# print SOCK ".\r\n";
@@ -621,9 +654,10 @@ TipJar::MTA - outgoing SMTP with exponential random backoff.
   use TipJar::MTA '/var/spool/MTA';	# must be a writable -d
 					# defaults to ./MTAdir
   $TipJar::MTA::interval='100';		# the default is 17
-  $TipJar::MTA::AgeBeforeDeferralReport=3500; # default is 4 hours
-  $TipJar::MTA::MyDomain='cpan.org';	# defaults to `hostname`
-					# And awaay we go,
+  $TipJar::MTA::TimeStampFrequency='35';	# the default is 200
+  $TipJar::MTA::AgeBeforeDeferralReport=7000;	# default is 4 hours
+  $TipJar::MTA::MyDomain='peanut.af.mil';	# defaults to `hostname`
+					# And away we go,
   TipJar::MTA::run();			# logging to /var/spool/MTA/log/current
   
 
@@ -752,6 +786,14 @@ using Sys::Hostname instead of `hostname` and gracefully handling
 absolutely any combination of carriage-returns and line-feeds
 as valid line termination.
 
+=item 0.07 1 June 2003
+
+Wrapped all reads and writes to the SMTP socket in C<eval> blocks,
+and installed a ALRM signal handler, for better handling of time-out 
+conditions.  Also added a $TipJar::MTA::TimeStampFrequency variable
+which is how many iterations of the main fork-and-send loop to make
+before logging a timestamp.  The default is 200.
+
 =back
 
 =head1 To-do list and Known Bugs
@@ -762,13 +804,12 @@ Patches are welcome.
 
 =item log rolling
 
-there is no rotation of the log in the C<mylog()> function.  C<mylog>
-does
+there is no rotation of the log in the C<mylog()> function.
+C<mylog> does
 repoen the file by name on every logging event, though.  Rewriting mylog to
 use L<Unix::Syslog> or L<Sys::Syslog> would be cool, but would add dependencies.
-Mailing the log to the postmaster every few days would be easy to do but
-would constitute avoidance behaviour as there are more important things
-for me to do at this time; mailing a log file from L<cron> is easy enough.
+Mailing the log to the postmaster every once in a while is easy enough
+to do from L<cron>.
 
 =item connection reuse and per-domain queues
 
