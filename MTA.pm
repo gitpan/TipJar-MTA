@@ -1,11 +1,8 @@
 package TipJar::MTA;
 
-use 5.006;
 use strict;
 use warnings;
 use Carp;
-
-require Exporter;
 
 use vars qw/$VERSION $MyDomain $interval $basedir
 	 $ReturnAddress $Recipient 
@@ -16,7 +13,7 @@ use Fcntl ':flock'; # import LOCK_* constants
 $interval = 17;
 $AgeBeforeDeferralReport = 4 * 3600; # four hours
 
-$VERSION = '0.04';
+$VERSION = '0.05';
 
 $SIG{CHLD} = 'IGNORE';
 
@@ -74,6 +71,8 @@ sub run(){
 	# temp dir contains message objects under construction
 	-d "$basedir/temp" or mkdir "$basedir/temp",0770
 		or die "could not mkdir $basedir/temp: $!" ;
+
+
 	{	# only one MTA at a time, so we can run this 
 		# from cron
 	open PID, ">>$basedir/temp/MTApid"; # "touch" sort of
@@ -83,6 +82,7 @@ sub run(){
 	chomp ( my $oldpid = <PID>);
 
 	if ($oldpid and kill 0, $oldpid){
+		print "$$ MTA process number $oldpid is still running\n";
 		mylog "$$ MTA process number $oldpid is still running\n";
 		exit;
 	};
@@ -94,7 +94,8 @@ sub run(){
 	}
 
 	# immediate dir contains reprioritized deferred objects
-	-d "$basedir/immediate" or mkdir "$basedir/immediate",0770;
+	-d "$basedir/immediate" or mkdir "$basedir/immediate",0770
+		or die "could not mkdir $basedir/immediate: $!" ;
 
 	# endless top level loop
 	mylog "$$ starting fork-and-wait loop\n";
@@ -171,7 +172,8 @@ sub run(){
 	};
 
 	# process all messages in immediate directory
-	opendir BASEDIR, "$basedir/immediate" or die "could not open immediate dir: $!";
+	opendir BASEDIR, "$basedir/immediate"
+		or die "could not open immediate dir: $!";
 	@entries = readdir BASEDIR;
 	for my $file (@entries){
 		my $M = newmessage "$basedir/immediate/$file" or next;
@@ -544,7 +546,7 @@ TipJar::MTA - outgoing SMTP with exponential random backoff.
   $TipJar::MTA::AgeBeforeDeferralReport=3500; # default is 4 hours
   $TipJar::MTA::MyDomain='cpan.org';	# defaults to `hostname`
 					# And awaay we go,
-  TipJar::MTA::run();			# logging to STDOUT.
+  TipJar::MTA::run();			# logging to /var/spool/MTA/log/current
   
 
 =head1 DESCRIPTION
@@ -627,7 +629,7 @@ None.
 
 =head1 DEPENDENCIES
 
-the <Cdnsmx()> function uses the dnsmx program from the djbdns tool package:
+the C<dnsmx()> function uses the dnsmx program from the djbdns tool package:
 it is abstracted into a function for easy replacement with your preferred
 MX lookup tool.
 
@@ -645,47 +647,62 @@ of dots in them, which could conceivably not be portable.
 
 =item 0.03 17 April 2003
 
-	threw away some inefficient archtecture ideas, such as
-	per-domain queues for connection reuse, in order to have
-	a working system ASAP.  Testing kill-zero functionality in
-	test script.
+threw away some inefficient archtecture ideas, such as
+per-domain queues for connection reuse, in order to have
+a working system ASAP.  Testing kill-zero functionality in
+test script.
 
 =item 0.04 20 April 2003
 
-	logging to $basedir/log/current instead of stdout, unless
-	$LogToStdout is true.
-	$AgeBeforeDeferralReport
-	variable to suppress deferral
-	bounces when a message has been queued for less than an
-	interval.
+logging to $basedir/log/current instead of stdout, unless
+$LogToStdout is true.
+$AgeBeforeDeferralReport
+variable to suppress deferral
+bounces when a message has been queued for less than an
+interval.
+
+
+=item 0.05 22 April 2003
+
+slight code and documentation cleanup
 
 =back
 
-=head1 To-do list
+=head1 To-do list and Known Bugs
 
 Patches are welcome.
 
 =over 4
 
+=item log rolling
+
+there is no rotation of the log in the C<mylog()> function.  C<mylog>
+does
+repoen the file by name on every logging event, though.  Rewriting mylog to
+use L<Unix::Syslog> or L<Sys::Syslog> would be cool, but would add dependencies.
+Mailing the log to the postmaster every few days would be easy to do but
+would constitute avoidance behaviour as there are more important things
+for me to do at this time; mailing a log file from L<cron> is easy enough.
+
 =item connection reuse and per-domain queues
 
-	have deferred messages organized by peer, when the
-	deferral is because of connection problems.  Group the
-	"immediate" messages by domain so we can reuse a connection
-	instead of trying to make a new connection
+have deferred messages organized by peer, when the
+deferral is because of connection problems, possibly by grouping the
+"immediate" messages by domain so we can reuse a connection
+instead of trying to make a new connection
 
 =item ESMTP
 
-	take advantage of post-RFC-821 features
+take advantage of post-RFC-821 features
 
 =item QMTP
 
-	use QMTP when available.
+use QMTP when available.
 
 =item local deliveries
 
-	add MBOX and MailDir deliveries and some kind of
-	configuration interface
+add MBOX and MailDir deliveries and some kind of
+configuration interface
 
 =back
 
