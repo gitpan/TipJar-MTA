@@ -1,6 +1,8 @@
 
 package TipJar::MTA::dateheader;
 
+my $string = 'a';
+
 sub TIESCALAR{
 	my $x;
 	bless \$x;
@@ -43,6 +45,8 @@ use vars qw/
 	$LastChild
 	$TimeStampFrequency
 	$timeout
+	$Domain
+	$ConnectionProblem
 /;
 
 $TimeStampFrequency = 200; # just under an hour at 17 seconds each
@@ -55,7 +59,7 @@ use Fcntl ':flock'; # import LOCK_* constants
 $interval = 17;
 $AgeBeforeDeferralReport = 4 * 3600; # four hours
 
-$VERSION = '0.10';
+$VERSION = '0.12';
 
 $SIG{CHLD} = 'IGNORE';
 
@@ -80,7 +84,8 @@ $LogToStdout = 0;
 {
 my $LogTime = 0;
 
-
+sub DLsave($);
+sub DLpurge();
 
 sub mylog(@);
 sub mylog(@){
@@ -134,6 +139,11 @@ sub run(){
 	-d "$basedir/queue"
 		or mkdir "$basedir/queue",0770
 		or die "could not mkdir $basedir/queue: $!" ;
+
+	# domain dir contains lists of queued messages, per domain.
+	-d "$basedir/domain"
+		or mkdir "$basedir/domain",0770
+		or die "could not mkdir $basedir/domain: $!" ;
 
 	# temp dir contains message objects under construction
 	-d "$basedir/temp" or mkdir "$basedir/temp",0770
@@ -223,15 +233,15 @@ sub run(){
 				die "no body in message";
 			};
 			# never mind $Recip =~ s/\s*<*([^<>\s]+\@[\w\-\.]+).*$/$1/s or last;
-			mylog "for $Recip";
 			$Recip =~ /\@/ or last;
+			mylog "for $Recip";
 			push @RecipList, $Recip;
 			mylog "Recipients: @RecipList";
 		};
 
 
-		my $string = 'a';
 		foreach $Recip (@RecipList){
+			($Domain) = $Recip =~ /\@([\w\-\.]+)/;
 			$string++;
 			open TEMP, ">$basedir/temp/$time.$$.$string";
 			print TEMP "$FirstLine\n$Recip\n",@MessData,"\n";
@@ -239,6 +249,8 @@ sub run(){
 			rename 
 			"$basedir/temp/$time.$$.$string",
 			"$basedir/immediate/$time.$$.$string";
+			mylog 
+			DLsave "$basedir/immediate/$time.$$.$string";
 		};
 
 	};
@@ -327,15 +339,14 @@ use Socket;
 my $CRLF = CRLF;
 
 sub eofSOCK(){
-
-	seek SOCK, 0, 1;
-	my $syserr = $!;
-	$syserr =~ /^Illegal seek/ and return 0;
-
-	# a seek on a closed socket gives a different error.
-
-	mylog $syserr;
-	return 1;
+	no warnings;
+	my $hersockaddr    = getpeername(SOCK);
+	if (defined $hersockaddr){
+		return undef;
+	}else{
+		mylog "SOCK not connected";
+		return 1;
+	};
 };
 
 sub getresponse($){
@@ -394,14 +405,31 @@ sub getresponse($){
 	$response;
 };
 
+my $onioning=0;
 
 sub attempt{
+	$ConnectionProblem = 0;
 	# deliver and delete, or requeue; also send bounces if appropriate
 	my $message = shift;
 	mylog "Attempting [$ReturnAddress] -> [$Recipient]";
 	# Message Data is supposed to start on third line
 
-	my ($Domain) = $Recipient =~ /\@([^\s>]+)/ or goto GoodDelivery;
+	########################################
+	# reuse sock or define global $Domain
+	########################################
+	if (defined($Domain) and $Domain and $Recipient =~ /\@$Domain$/){
+		eofSOCK or goto HaveSOCK;
+	};
+
+	unless(($Domain) = $Recipient =~ /\@([^\s>]+)/){
+		mylog "no domain in recipient [$Recipient]";
+		unlink $$message;
+		return;
+	};
+	########################################
+	# $Domain is now defined
+	########################################
+
 
 	my @dnsmxes;
 	@dnsmxes = dnsmx($Domain);
@@ -418,7 +446,7 @@ sub attempt{
 	TryAgain:
 
 	while($Peerout = shift @dnsmxes){
-		mylog "attempting $Peerout";
+		# mylog "attempting $Peerout";
 
 		# connect to $Peerout, smtp
 		my @GHBNres;
@@ -426,6 +454,7 @@ sub attempt{
 			if ($dnsmx_count == 1 and
 			    $Peerout eq $Domain){
 				mylog $line="Apparently there is no valid MX for $Domain";
+				$ConnectionProblem = 0;
 				goto Bounce;
 			};
 			next;
@@ -446,6 +475,7 @@ sub attempt{
 	};
 
 	mylog "Unable to establish SMTP connection to $Domain MX";
+	$ConnectionProblem = 1;
 	goto ReQueue_unconnected;
 
 
@@ -477,7 +507,10 @@ sub attempt{
 		goto TryAgain;
 	};
         # print SOCK "RSET",CRLF;
-        $line = getresponse "RSET" or goto TryAgain;
+
+	HaveSOCK:
+	$line = getresponse "RSET" or goto TryAgain;
+       
         # expect 250
         # $line = getresponse;
 	# mylog "RSET and got [$line]";
@@ -587,8 +620,9 @@ sub attempt{
 	goto GoodDelivery;
 
 	ReQueue:
-	mylog getresponse 'QUIT';
-	close SOCK;
+	$message->requeue($line);
+	goto GoodDelivery;
+
 	ReQueue_unconnected:
 	$message->requeue($line);
 	return undef;
@@ -626,9 +660,37 @@ EOF
 	rename "$basedir/temp/$filename","$basedir/immediate/$filename";
 
 	GoodDelivery:
-	mylog getresponse 'QUIT';
+	unlink $$message;	# "true"
+
+	alarm 0;
+	if( -f "$basedir/domain/$Domain"){
+		open DOMAINLOCK, ">>$basedir/domain/.lock";
+		flock DOMAINLOCK, LOCK_EX;
+		rename "$basedir/domain/$Domain","$basedir/domain/$Domain.$$";
+		flock DOMAINLOCK, LOCK_UN;
+		close DOMAINLOCK;
+		# sleep 4;	# let any writers finish writing
+		local *DOMAINLIST;
+		$onioning++;
+		open DOMAINLIST, "<$basedir/domain/$Domain.$$";
+		while (<DOMAINLIST>){
+			chomp;
+			-f $_ or next;
+			mylog "reusing sock with $_";
+			my $M = newmessage $_; # sets some globals
+			$M or next;
+			$M->attempt();
+		};
+		unlink "$basedir/domain/$Domain.$$";
+		$onioning--;
+	};
+	
+	$onioning and return;
+
+	eofSOCK or mylog getresponse 'QUIT';
 	close SOCK;
-	return unlink $$message;	# "true"
+
+	return;
 
 };
 
@@ -673,6 +735,9 @@ EOF
 
 		unlinkme:
 		unlink $$message;
+
+		# clean up per-domain queue
+		DLpurge;
 	};
 
 	if (
@@ -726,11 +791,51 @@ EOF
 	or mkdir "$basedir/queue/$dir/$subdir", 0777
 	or croak "$$ Permissions problems: $basedir/queue/$dir/$subdir [$!]\n";
 
-	# $fname = FIXME -- something to do with the domain?
 
 	rename $$message, "$basedir/queue/$dir/$subdir/$fname";
 	mylog "message queued to $basedir/queue/$dir/$subdir/$fname";
 
+	$ConnectionProblem and DLsave("$basedir/queue/$dir/$subdir/$fname"); ;
+};
+
+sub DLpurge(){
+	-f "$basedir/domain/$Domain" or return;
+	my @list;
+	open DOMAINLISTLOCK, ">>$basedir/domain/.lock"
+	   or return mylog "could not open [$basedir/domain/.lock] for append";
+	alarm 0;	# we're going to block for the lock
+	flock DOMAINLISTLOCK, LOCK_EX;
+	open DOMAINLIST, "<$basedir/domain/$Domain";
+	chomp(@list = <DOMAINLIST>);
+	@list = grep { -f $_ } @list;
+	
+	if (@list){
+	 open DOMAINLIST, ">$basedir/domain/$Domain"
+	   or return mylog "could not open [$basedir/domain/$Domain] for clobber";
+	 foreach (@list){
+		print DOMAINLIST "$_\n";
+	 };
+	 close DOMAINLIST;
+	}else{
+	 unlink "$basedir/domain/$Domain";
+
+	};
+	 flock DOMAINLISTLOCK, LOCK_UN;
+	 close DOMAINLISTLOCK;
+
+};
+
+sub DLsave($){
+	open DOMAINLISTLOCK, ">>$basedir/domain/.lock"
+	   or return mylog "could not open [$basedir/domain/.lock] for append";
+	alarm 0;	# we're going to block for the lock
+	flock DOMAINLISTLOCK, LOCK_EX;
+	open DOMAINLIST, ">>$basedir/domain/$Domain"
+	   or return mylog "could not open [$basedir/domain/$Domain] for append";
+	print DOMAINLIST "$_[0]\n";
+	close DOMAINLIST;
+	flock DOMAINLISTLOCK, LOCK_UN;
+	close DOMAINLISTLOCK;
 
 };
 
@@ -899,26 +1004,20 @@ handling of MXes that we cannot connect to, by defining a
 C<ReQueue_unconnected>
 entry point in addition to the C<ReQueue> one that we had already..
 
-=item 0.09 19 June 2003
+=item 0.10 19 June 2003
 
-We now bounce mail to domains that ( have no MX records OR there
-is only one MX record and it is the same as the domain name ) AND
-we could not resolve the one name. Previously it had been given
-the full benefit of the doubt.
+We now bounce mail to domains that ( have no MX records OR there is only one MX record and it is the same as the domain name ) AND we could not resolve the one name. Previously it had been given the full benefit of th doubt.
 
+=item 0.11 late June 2003
 
-=item 0.10 24 June 2003
+implemented domain listing for connection reuse.  New messages and
+messages queued due to connection failure (but not 400 codes)
+get listed in the per-domain queue.
 
-Better handling of slow peers.  C<sysread> does not block and C<eof> cannot
-be used on sockets, did you know that?  We check for socket openness by
-seeking and looking at the text of the resulting error message.  Instead
-of using an OO interface.  Also timeouts are now handled with a global
-variable instead of C<die> because C<die>ing from a signal handler does
-not get appear to get caught by an eval enclosing the point of execution
-at the time of the signal.  Is this a bug?
+=item 0.12 18 July 2003
 
-Anyway TipJar::MTA.pm has been handling outgoing production e-mail for
-a couple weeks now.
+fixed a bug that caused the earlier of multiple messages handled
+in the same batch to get clobbered.  Re-engineering domain file locking too.
 
 =back
 
@@ -936,13 +1035,6 @@ repoen the file by name on every logging event, though.  Rewriting mylog to
 use L<Unix::Syslog> or L<Sys::Syslog> would be cool, but would add dependencies.
 Mailing the log to the postmaster every once in a while is easy enough
 to do from L<cron>.
-
-=item connection reuse and per-domain queues
-
-have deferred messages organized by peer, when the
-deferral is because of connection problems, possibly by grouping the
-"immediate" messages by domain so we can reuse a connection
-instead of trying to make a new connection
 
 =item ESMTP
 

@@ -24,7 +24,9 @@ my $HN = hostname();
 ok($HN,$TipJar::MTA::MyDomain);
 
 print "testing dnsmx function\n";
-ok(scalar(TipJar::MTA::dnsmx( 'cpan.org' )));
+my @cpan = TipJar::MTA::dnsmx( 'cpan.org' );
+print "cpan.org MX: @cpan\n";
+ok(@cpan > 1);
 
 print "$$ using /tmp/MTA_test_dir for basedir in test script\n";
 $TipJar::MTA::basedir = '/tmp/MTA_test_dir';
