@@ -1,0 +1,41 @@
+TipJar/MTA version 0.01
+=======================
+
+An outgoing SMTP system. All messages live in their own files
+under a directory that should be on a file system big enough to hold
+everything.
+
+Messages that receive 400-level error codes (temporary delivery
+failure) will be retried at increasing random intervals for a
+week.
+
+use TipJar::MTA::queue to add messages for sending, or simply
+link your properly formatted message into the working directory.
+
+INSTALLATION
+
+To install this module type the following:
+
+   perl Makefile.PL
+   make
+   make test
+   make install
+
+or simply unpack it and refer to the directory with
+Perl's -I command line option.
+
+DEPENDENCIES
+
+This module uses "dnsmx" from
+the djbdns package (http://cr.yp.to/djbdns) for the lookups
+at this time.  A Net::DNS version would be welcome.  The DNS
+function is abstracted, in the dnsmx() function,
+near the beginning of the module.
+
+COPYRIGHT AND LICENCE
+
+Copyright (C) 2003 David Nicol / TipJar LLC, released GPL/AL.  It
+gives me great validation to hear of people reusing my efforts,
+so send a postcard, if you like.  My address is
+Post office box 45163 / Kansas City, Missouri 64171 / USA
+
