@@ -1,30 +1,4 @@
 
-package TipJar::MTA::dateheader;
-
-my $string = 'a';
-
-sub TIESCALAR{
-	my $x;
-	bless \$x;
-};
-@days=qw/Sun Mon Tue Wed Thu Fri Sat/;
-@months=qw/Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec/;
-
-sub FETCH{
-   my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday)
-   =  gmtime(time);
-   #adjust date for printability:
-   $year += 1900;
-   # zero-pad time-of-day components
-   $hour = substr("0$hour", -2);
-   $min = substr("0$min", -2);
-   $sec = substr("0$sec", -2);
-
-   return
-   "Date: $days[$wday], $mday $months[$mon] $year $hour:$min:$sec +0000";
-};
-
-
 package TipJar::MTA;
 
 
@@ -33,8 +7,6 @@ package TipJar::MTA;
 use strict;
 use warnings;
 use Carp;
-
-tie my $dateheader, 'TipJar::MTA::dateheader';
 
 use vars qw/
 	$VERSION $MyDomain $interval $basedir
@@ -45,9 +17,15 @@ use vars qw/
 	$LastChild
 	$TimeStampFrequency
 	$timeout
-	$Domain
-	$ConnectionProblem
+	$Domain $line
+	$ConnectionProblem $dateheader
 /;
+
+
+# tie my $dateheader, 'TipJar::MTA::dateheader';
+use dateheader;
+# BEGIN { print $dateheader; };
+sub cachepurge();
 
 $TimeStampFrequency = 200; # just under an hour at 17 seconds each
 
@@ -59,7 +37,7 @@ use Fcntl ':flock'; # import LOCK_* constants
 $interval = 17;
 $AgeBeforeDeferralReport = 4 * 3600; # four hours
 
-$VERSION = '0.12';
+$VERSION = '0.13';
 
 $SIG{CHLD} = 'IGNORE';
 
@@ -93,8 +71,9 @@ sub mylog(@){
 	if (time - $LogTime > 30){
 		$LogTime = time;
 		mylog scalar localtime;
-
 	};
+
+	defined $Recipient or $Recipient='no recipient';
 
 	open LOG, ">>$basedir/log/current" or print(@_,"\n") and return;
 	flock LOG, LOCK_EX or die "flock: $!";
@@ -112,12 +91,10 @@ sub mylog(@){
 
 };
 
-# END {
-# 	mylog "exiting";
-# };
 
 sub run(){
 
+	my $string = 'a' ;
 	$Recipient = '';
 
 	$SIG{ALRM} = sub { mylog 'TIMEOUT -- caught alarm signal'; 
@@ -144,6 +121,16 @@ sub run(){
 	-d "$basedir/domain"
 		or mkdir "$basedir/domain",0770
 		or die "could not mkdir $basedir/domain: $!" ;
+
+	# 4error dir contains lists of 4NN-error remote addresses, per domain.
+	-d "$basedir/4error"
+		or mkdir "$basedir/4error",0770
+		or die "could not mkdir $basedir/4error: $!" ;
+
+	# 5error dir contains lists of 5NN-error remote addresses, per domain.
+	-d "$basedir/5error"
+		or mkdir "$basedir/5error",0770
+		or die "could not mkdir $basedir/5error: $!" ;
 
 	# temp dir contains message objects under construction
 	-d "$basedir/temp" or mkdir "$basedir/temp",0770
@@ -180,6 +167,8 @@ sub run(){
 	for(;;){
 		++$count % $TimeStampFrequency or
 			mylog(time,": ",scalar( localtime)," ",$count);
+
+		rand(100) < 0.1 and cachepurge; # how long is 17000 seconds?
 
 		# new child drops out of the waiting loop
 		$LastChild = fork or last;	
@@ -218,7 +207,7 @@ sub run(){
 		};
 
 		my @MessData = (<MESSAGE0>);
-		mylog @MessData;
+		mylog scalar(@MessData),"lines of message data";
 
 		chomp(my $FirstLine = shift @MessData);
 		mylog "from [[$FirstLine]]";
@@ -242,6 +231,7 @@ sub run(){
 
 		foreach $Recip (@RecipList){
 			($Domain) = $Recip =~ /\@([\w\-\.]+)/;
+			$Domain =~ y/A-Z/a-z/;
 			$string++;
 			open TEMP, ">$basedir/temp/$time.$$.$string";
 			print TEMP "$FirstLine\n$Recip\n",@MessData,"\n";
@@ -316,6 +306,117 @@ sub newmessage($){
 	chomp ($Recipient = <MESSAGE>);
 	bless \$messageID;
 };
+
+my $purgecount;
+sub purgedir($){
+	my $now = time();
+	opendir SUBDIR, $_[0];
+	foreach (readdir SUBDIR){
+		-f $_ or next;
+		my @statresult = stat(_);
+		my $mtime = $statresult[9];
+		if(($now - $mtime) > (4 * 60 * 60)){
+
+			unlink $_;
+			$purgecount++;
+
+		};	
+	};
+};
+
+
+sub cachepurge(){
+	$purgecount = 0;
+	opendir DIR, "$basedir/4error/"	;
+	my @fours = map {"$basedir/4error/$_"} readdir DIR;
+
+	opendir DIR, "$basedir/5error/"	;
+	my @fives = map {"$basedir/5error/$_"} readdir DIR;
+
+	foreach ( @fours, @fives ) {
+		/error\/\.\.?$/  and next;
+		purgedir($_);
+	};
+	mylog "purged 4XX,5XX cache and eliminated $purgecount entries";
+
+};
+
+
+sub cache4($){
+	mylog "caching ",$_[0],$line;
+	my ($user,$host) = split '@',$_[0],2 or return undef;
+	$host =~ y/A-Z/a-z/;
+	$host =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+	$user =~ y/A-Z/a-z/;
+	$user =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+	-d "$basedir/4error/$host"
+		or mkdir "$basedir/4error/$host",0770
+		or die "could not mkdir $basedir/4error/$host: $!" ;
+	open CACHE, ">$basedir/4error/$host/$user.TMP$$";
+	print CACHE time(),"\n$line cached ".localtime()."\n";
+	close CACHE;
+	rename "$basedir/4error/$host/$user.TMP$$","$basedir/4error/$host/$user";
+
+}
+sub cache4test($){
+	my ($user,$host) = split '@',$_[0],2 or return undef;
+	$host =~ y/A-Z/a-z/;
+	$host =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+	$user =~ y/A-Z/a-z/;
+	$user =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+	-d "$basedir/4error/$host" or return undef;
+	-f "$basedir/4error/$host/$user" or return undef;
+	open CACHE, "<$basedir/4error/$host/$user";
+	my $ctime;
+	($ctime,$line) = <CACHE>;
+	close CACHE;
+	if ((time() - $ctime ) > ( 4 * 60 * 60 )){
+		# 4-file is more than 4 hours old
+		unlink "$basedir/4error/$host/$user";
+		return undef;
+	};
+	mylog "4cached ", $line;
+	return $ctime;
+}
+
+sub cache5($){
+	mylog "caching ",$_[0],$line;
+	my ($user,$host) = split '@',$_[0],2 or return undef;
+	$host =~ y/A-Z/a-z/;
+	$host =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+	$user =~ y/A-Z/a-z/;
+	$user =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+	-d "$basedir/5error/$host"
+		or mkdir "$basedir/5error/$host",0770
+		or die "could not mkdir $basedir/5error/$host: $!" ;
+	open CACHE, ">$basedir/5error/$host/$user.TMP$$" or mylog "CACHEfile: $basedir/5error/$host/$user.TMP$$   $!";
+	print CACHE time(),"\n$line cached ".localtime()."\n";
+	close CACHE;
+	rename "$basedir/5error/$host/$user.TMP$$","$basedir/5error/$host/$user";
+}
+
+sub cache5test($){
+	my ($user,$host) = split '@',$_[0],2 or return undef;
+	$host =~ y/A-Z/a-z/;
+	$host =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+	$user =~ y/A-Z/a-z/;
+	$user =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+	-d "$basedir/5error/$host" or return undef;
+	-f "$basedir/5error/$host/$user" or return undef;
+	open CACHE, "<$basedir/5error/$host/$user";
+	flock CACHE, LOCK_SH;
+	my $ctime;
+	($ctime,$line) = <CACHE>;
+	close CACHE;
+	if ((time() - $ctime ) > ( 4 * 60 * 60 )){
+		# 5-file is more than 4 hours old
+		unlink "$basedir/5error/$host/$user";
+		return undef;
+	};
+	mylog "5cached ", $line;
+	return $ctime;
+}
+
 
 use Socket;
 
@@ -396,18 +497,50 @@ sub getresponse($){
 			};
 		} while( $more );
 
-		my $line = join('',@letters);
+		my $iline = join('',@letters);
 
-	#	mylog "received: [$line]";
-		$response .= $line;
-		($dash) = $line =~ /^\d+([\-\ ])/;
+	#	mylog "received: [$iline]";
+		$response .= $iline;
+		($dash) = $iline =~ /^\d+([\-\ ])/;
 	};
 	$response;
 };
 
 my $onioning=0;
 
+sub deferralmessage{
+# usage: $message->deferralmessage("reason we are deferring")
+
+	$ReturnAddress =~ /\@/ or return; #suppress doublebounces
+	my $filename = join '.',time,'DeferralReport',rand(10000000);
+	open BOUNCE, ">$basedir/temp/$filename";
+	print BOUNCE <<EOF; # we are moving this into immediate
+<>
+$ReturnAddress
+$dateheader
+From: MAILER-DAEMON
+To: $ReturnAddress
+Subject: delivery deferral to <$Recipient>
+Content-type: text/plain
+
+$_[0]
+
+The first eighty lines of the message follow below:
+-------------------------------------------------------------
+EOF
+
+	seek(MESSAGE,0,0);
+	for(1..80){
+		defined(my $lin = <MESSAGE>) or last;
+		print BOUNCE $lin;
+	};
+	close BOUNCE;
+	rename "$basedir/temp/$filename","$basedir/immediate/$filename";
+}
+# end sub deferralmessage
+
 sub attempt{
+	$line='';
 	$ConnectionProblem = 0;
 	# deliver and delete, or requeue; also send bounces if appropriate
 	my $message = shift;
@@ -417,7 +550,7 @@ sub attempt{
 	########################################
 	# reuse sock or define global $Domain
 	########################################
-	if (defined($Domain) and $Domain and $Recipient =~ /\@$Domain$/){
+	if (defined($Domain) and $Domain and $Recipient =~ /\@$Domain$/i){
 		eofSOCK or goto HaveSOCK;
 	};
 
@@ -426,6 +559,7 @@ sub attempt{
 		unlink $$message;
 		return;
 	};
+	$Domain =~ y/A-Z/a-z/;
 	########################################
 	# $Domain is now defined
 	########################################
@@ -441,7 +575,11 @@ sub attempt{
 	};
 	my $Peerout;
 
-	my $line;
+
+	cache4test $Recipient and
+		goto ReQueue;
+	cache5test $Recipient and
+		goto Bounce;
 
 	TryAgain:
 
@@ -484,13 +622,23 @@ sub attempt{
 
         # expect 220
         alarm 60;
-        eval { $line = <SOCK>; };
+	my $Greetingcounter = 0;
+	ExpectGreeting:
+        eval { defined($line = <SOCK>) or die "no line from socket."; };
 	if($@){
 		mylog $@;
 		close SOCK;
 		goto TryAgain;
 	};
-        mylog "$line";
+	unless (length $line){
+		sleep 2;
+		if($Greetingcounter++ < 5){
+			goto ExpectGreeting;
+		};
+		goto TryAgain;
+	};
+
+        mylog "greeting: $line";
 	unless($line =~ /^2/){
 		mylog "Weird greeting: [$line]";
 		close SOCK;
@@ -501,7 +649,7 @@ sub attempt{
         # expect 250
         $line = getresponse "HELO $MyDomain" or goto TryAgain;
 	mylog $line;
-        unless($line =~ /^250 /){
+        unless($line =~ /^250[ \-]/){
 		mylog "peer not happy with HELO: [$line]";
 		close SOCK;
 		goto TryAgain;
@@ -514,7 +662,7 @@ sub attempt{
         # expect 250
         # $line = getresponse;
 	# mylog "RSET and got [$line]";
-        unless($line =~ /^250 /){
+        unless($line =~ /^250[ \-]/){
 		mylog "peer not happy with RSET: [$line]\n";
 		close SOCK;
 		goto TryAgain;
@@ -552,10 +700,12 @@ sub attempt{
         unless($line =~ /^2/){
 		mylog "peer not happy with recipient: [$line]";
 		if ($line =~ /^4/){
+			cache4 $Recipient;
 			mylog "requeueing";
 			goto ReQueue;
 		};
 		if ($line =~ /^5/){
+			cache5 $Recipient;
 			mylog "bouncing";
 			goto Bounce;
 		};
@@ -630,8 +780,13 @@ sub attempt{
 	Bounce:
 
 	$ReturnAddress =~ /\@/ or goto GoodDelivery; #suppress doublebounces
-	my $filename = join '.',time,$$,'bounce',rand(10000000);
+	my $filename = join '.',time(),'bounce',rand(10000000);
 	open BOUNCE, ">$basedir/temp/$filename";
+	defined($line) or $line='unknown reason';
+	defined($Recipient) or $Recipient='unknown recipient';
+	defined($ReturnAddress) or $ReturnAddress='<>';
+	defined($Peerout) or $Peerout='unknown peer';
+
 	print BOUNCE <<EOF;
 <>
 $ReturnAddress
@@ -775,8 +930,7 @@ EOF
 	close BOUNCE;
 	rename "$basedir/temp/$filename","$basedir/immediate/$filename";
 
-		$message->deferralmessage("Will keep attempting until message is over a week old");
-	};
+	}; # if old enough to report as deferred 
 
 	my $futuretime = int(time + 100 + ( $age * ( 3 + rand(2)) / 4));
 	# print "futuretime will be $futuretime\n";
@@ -872,6 +1026,14 @@ exponentially deferred random backoffs on temporary failure.
 Future delivery scheduling is determined by what directory
 a message appears in.  File age, according to C<stat()>, is
 used to determine repeated deferral.
+
+We reuse a socket to a domain if we had trouble connecting to
+the MX for that domain in the past, or for multiple new messages
+going to the same domain.  We also cache 4XX and 5XX error codes
+on recipients for four hours to eliminate a mess of traffic when,
+for instance, we have to bounce many messages to the same
+bogus return address.  We will get a "550 User Unknown" error
+on the first bounce and throw away the others.
 
 Every C<$interval> seconds,  we fork a child process.
 
@@ -1018,6 +1180,16 @@ get listed in the per-domain queue.
 
 fixed a bug that caused the earlier of multiple messages handled
 in the same batch to get clobbered.  Re-engineering domain file locking too.
+
+=item 0.13 20 July 2003
+
+we can now handle multi-line 250 responses.  They exist. Also
+fixed a problem with retry deferral. And lowercasing of domain.
+And SMTP peers who give you a tiny packet on connection before
+they send their 220 greeting. And several "uninitialized value" warnings.
+
+Adding a framework for remembering and caching recipient-based 4* and 5* errors
+for four hours.
 
 =back
 
