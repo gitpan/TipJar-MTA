@@ -1,4 +1,4 @@
-TipJar/MTA version 0.14
+TipJar/MTA version 0.18
 =======================
 
 An outgoing SMTP system. All messages live in their own files
@@ -15,7 +15,10 @@ failure) will be retried at increasing random intervals for a
 week.
 
 use TipJar::MTA::queue to add messages for sending, or simply
-link your properly formatted message into the working directory.
+link your properly formatted message into the working directory,
+or link your messages for single recipients into the immediate 
+directory.
+
 
 INSTALLATION
 
@@ -37,7 +40,7 @@ Net::DNS.
 
 COPYRIGHT AND LICENCE
 
-Copyright (C) 2003 David Nicol / TipJar LLC, released GPL/AL.  It
+Copyright (C) 2003,2004,2005 David Nicol / TipJar LLC, released GPL/AL.  It
 gives me great validation to hear of people reusing my efforts,
 so send a postcard, if you like.  My address is
 Post office box 45163 / Kansas City, Missouri 64171 / USA

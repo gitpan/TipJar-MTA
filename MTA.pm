@@ -18,20 +18,23 @@ use vars qw/
 	$ConnectionProblem $dateheader
 	$dnsmxpath $ConRetryDelay $ReuseQuota $ReuseQuotaInitial
 	@NoBounceRegexList
+	$MaxActiveKids
+	$FourErrCacheLifetime
 /;
 
 $ConRetryDelay = 17 * 60 ;
+$FourErrCacheLifetime = 7 * 60;
 # $dnsmxpath = 'dnsmx';
 $ReuseQuotaInitial = 20;
 
 
-# tie my $dateheader, 'TipJar::MTA::dateheader';
 use dateheader;
-# BEGIN { print $dateheader; };
 sub concachetest($);
 sub cachepurge();
 
 $TimeStampFrequency = 200; # just under an hour at 17 seconds each
+
+$MaxActiveKids = 5; # just how much spam are we sending?
 
 sub CRLF(){
 	"\015\012"
@@ -41,7 +44,7 @@ use Fcntl ':flock'; # import LOCK_* constants
 $interval = 17;
 $AgeBeforeDeferralReport = 4 * 3600; # four hours
 
-$VERSION = '0.17';
+$VERSION = '0.18';
 
 sub VERSION{
 	$_[1] or return $VERSION;
@@ -54,7 +57,6 @@ sub VERSION{
 	$VERSION;
 };
 
-$SIG{CHLD} = 'IGNORE';
 
 use Sys::Hostname;
 
@@ -106,6 +108,8 @@ sub mylog(@){
 
 };
 
+my $ActiveKids;
+$SIG{CHLD} = sub{ $ActiveKids--; wait };
 
 sub run(){
 
@@ -184,10 +188,16 @@ sub run(){
 		++$count % $TimeStampFrequency or
 			mylog(time,": ",scalar( localtime)," ",$count);
 
-		rand(100) < 0.1 and cachepurge; # how long is 17000 seconds?
+		rand(100) < 1 and cachepurge; # how long is 17000 seconds?
 
+		if($ActiveKids > $MaxActiveKids){
+			mylog "$ActiveKids child procs (more than $MaxActiveKids)";
+			sleep (1 + int($interval / 3));
+			next;
+		};
 		# new child drops out of the waiting loop
-		$LastChild = fork or last;	
+		$LastChild = fork or last;
+		$ActiveKids++;
 		if($OnlyOnce){
 			mylog "OnlyOnce flag set to [$OnlyOnce]";
 			return $OnlyOnce;
@@ -317,6 +327,11 @@ sub newmessage($){
 	#my $pack = shift;
 	my $messageID = shift;
 	-f $messageID or return undef;
+	-s $messageID or do{
+		# eliminate freeze on zero-length message files
+		unlink $messageID;
+		return undef;
+	};
 	open MESSAGE, "<$messageID" or return undef;
 	flock MESSAGE, LOCK_EX|LOCK_NB or return undef;
 	chomp ($ReturnAddress = <MESSAGE>);
@@ -325,20 +340,29 @@ sub newmessage($){
 };
 
 my $purgecount;
+sub purgedir($);
 sub purgedir($){
 	my $now = time();
-	opendir SUBDIR, $_[0];
+	my $dir = shift;
+	my $nonempty;
+	my @dirs;
+	opendir SUBDIR, $dir;
 	foreach (readdir SUBDIR){
-		-f $_ or next;
+		/^\.{1,2}$/ and next;
+		$nonempty = 1; 
+		-d "$dir/$_" and push @dirs, $_;
+		-f "$dir/$_" or next;
 		my @statresult = stat(_);
 		my $mtime = $statresult[9];
 		if(($now - $mtime) > (4 * 60 * 60)){
-
 			unlink $_;
 			$purgecount++;
-
 		};	
 	};
+	foreach my $sdir (@dirs) {
+		purgedir("$dir/$sdir");
+	};
+	rmdir $dir unless($nonempty); # patience is a virtue
 };
 
 
@@ -408,8 +432,8 @@ sub cache4test($){
 	my $ctime;
 	($ctime,$line) = <CACHE>;
 	close CACHE;
-	if ((time() - $ctime ) > ( 4 * 60 * 60 )){
-		# 4-file is more than 4 hours old
+	if ((time() - $ctime ) > $FourErrCacheLifetime ){
+		# 4-file is more than seven minutes old
 		unlink "$basedir/4error/$host/$user";
 		return undef;
 	};
@@ -1320,6 +1344,18 @@ We no longer get confused by multi-line greetings, which may have
 been the source of many earlier confusions
 
 log text changes
+
+
+=item 0.18 30 Mar 2005
+
+new conf variable $MaxActiveKids determines max parallel
+
+fixed problem with zero-length message files
+
+4xx error codes are now only cached $FourErrCacheLifetime seconds (defaults to 7 * 60 )
+
+error code cache cleanup is fixed
+
 
 =back
 
