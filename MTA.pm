@@ -4,20 +4,30 @@ use strict;
 use warnings;
 use Carp;
 
-use vars qw/$VERSION $MyDomain $interval $basedir
-	 $ReturnAddress $Recipient 
+use vars qw/
+	$VERSION $MyDomain $interval $basedir
+	$ReturnAddress $Recipient 
 	$AgeBeforeDeferralReport
 	$LogToStdout
+	$OnlyOnce
+	$LastChild
 /;
+
+sub CRLF(){
+	"\015\012"
+};
+
 use Fcntl ':flock'; # import LOCK_* constants
 $interval = 17;
 $AgeBeforeDeferralReport = 4 * 3600; # four hours
 
-$VERSION = '0.05';
+$VERSION = '0.06';
 
 $SIG{CHLD} = 'IGNORE';
 
-chomp($MyDomain = `hostname` || 'poorly configured TipJar::mta server');
+use Sys::Hostname;
+
+$MyDomain = ( hostname() || 'sys.hostname.returned.false' );
 
 my $time;
 sub newmessage($);
@@ -31,23 +41,40 @@ sub import{
 	$basedir ||= './MTAdir';
 };
 
-$LogToStdout = 0;
+$LogToStdout = 1;
 
+{
+my $LogTime;
+
+
+
+sub mylog(@);
 sub mylog(@){
-	open LOG, ">>$basedir/log/current" or print @_ and return;
-	flock LOG, LOCK_EX;
+
+	if (time - $LogTime > 30){
+		$LogTime = time;
+		mylog scalar localtime;
+
+	};
+
+	open LOG, ">>$basedir/log/current" or print(@_,"\n") and return;
+	flock LOG, LOCK_EX or die "flock: $!";
 	if($LogToStdout){
 		seek STDOUT,2,0;
-		print @_;
+		print "$$ ",@_;
+		print "\n";
 	}else{
 		seek LOG,2,0;
-		print LOG @_;
+		print LOG "$$ ",@_;
+		print LOG "\n";
 	};
 	flock LOG, LOCK_UN;	# flushes before unlocking
 };
 
+};
+
 END {
-	mylog "$$ exiting\n";
+	mylog "exiting";
 };
 
 sub run(){
@@ -83,7 +110,7 @@ sub run(){
 
 	if ($oldpid and kill 0, $oldpid){
 		print "$$ MTA process number $oldpid is still running\n";
-		mylog "$$ MTA process number $oldpid is still running\n";
+		mylog "MTA process number $oldpid is still running";
 		exit;
 	};
 
@@ -98,57 +125,59 @@ sub run(){
 		or die "could not mkdir $basedir/immediate: $!" ;
 
 	# endless top level loop
-	mylog "$$ starting fork-and-wait loop\n";
+	mylog "starting fork-and-wait loop";
 	for(;;){
-		fork or last;
+		# new child drops out of the waiting loop
+		$LastChild = fork or last;	
+		if($OnlyOnce){
+			mylog "OnlyOnce flag set to [$OnlyOnce]";
+			return $OnlyOnce;
+		};
 		sleep $interval;
 	};
 
 
 	$time=time;
-	mylog "$$ ",~~localtime,"\n";
 
 	# process new files if any
 	opendir BASEDIR, $basedir;
 	my @entries = readdir BASEDIR;
 	for my $file (@entries){
 		-f "$basedir/$file" or next;
-		mylog "$$ processing new message file $file\n";
+		-s "$basedir/$file" or next;
+		mylog "processing new message file $file";
 		# expand and write into temp, then try to
 		# deliver each file as it is expanded
 		unless(open MESSAGE0, "<$basedir/$file"){
-			mylog "$$ Could not open $basedir/$file for reading\n";
+			mylog "Could not open $basedir/$file for reading";
 			unless(unlink "$basedir/$file"){
-				mylog "$$ Could not unlink $basedir/$file\n";
+				mylog "Could not unlink $basedir/$file";
 			};
 			next;
 		};
 
 		flock MESSAGE0, LOCK_EX|LOCK_NB or next;
 
-		# UNLINK ISSUE
-		# if your computer cannot read from an unlinked file,
-		# uncomment the next line
-		# my @MessData = (<MESSAGE0>);
 		unless(unlink "$basedir/$file"){
-			mylog "$$ Could not unlink $basedir/$file\n";
+			mylog "Could not unlink $basedir/$file";
 			next;
 		};
-		# and comment this next line out
+
 		my @MessData = (<MESSAGE0>);
 
-		my $FirstLine = shift @MessData;
-		mylog "$$ from $FirstLine";
-		$FirstLine =~ s/\s*<*([^<>\s]*).*$/$1/s;
+		chomp(my $FirstLine = shift @MessData);
+		mylog "from [[$FirstLine]]";
+		# never mind $FirstLine =~ s/\s*<*([^<>\s]*).*$/$1/s;
 
 		my @RecipList;
 		my $Recip;
 
 		for(;;){
-			my $Recip = shift @MessData;
-			$Recip =~ s/\s*<*([^<>\s]+\@[\w\-\.]+).*$/$1/s or last;
+			chomp(my $Recip = shift @MessData);
+			# never mind $Recip =~ s/\s*<*([^<>\s]+\@[\w\-\.]+).*$/$1/s or last;
+			$Recip =~ /\S/ or last;
 
-			mylog "$$ for $Recip\n";
+			mylog "for $Recip";
 			push @RecipList, $Recip;
 		};
 
@@ -167,7 +196,6 @@ sub run(){
 			$M->attempt();	# will skip or requeue or delete
 		};
 
-		close MESSAGE0;
 
 	};
 
@@ -184,32 +212,33 @@ sub run(){
 	my($minieon,$microeon) = $time =~ /^(\d+)(\d\d)\d\d$/;
 	opendir QDIR, "$basedir/queue";
 	my @directories =
-	  grep { /\d/ and $_ <= $minieon and -d "$basedir/queue/$_" }
+	  grep { /^\d+$/ and $_ <= $minieon and -d "$basedir/queue/$_" }
 	    readdir QDIR;
 
 	for my $dir (@directories){	
 		opendir QDIR, "$basedir/queue/$dir";
 		my @directories2 =
-		  grep {
-	 /\d/ and ($dir * 100 + $_) < ($minieon*100 + $microeon)
-			}
 		    readdir QDIR;
 
 		unless (@directories2){
-			mylog "$$ removing directory queue/$dir\n";
+			mylog "removing directory queue/$dir";
 			rmdir "$basedir/queue/$dir";
 			next;
 		};
+
+		@directories2 = grep {
+	 /\d/ and ($dir * 100 + $_) < ($minieon*100 + $microeon)
+			} @directories2;
 
 		#move files in these directories into the immediate directory
 		for my $dir2 (@directories2){
 			opendir QDIR, "$basedir/queue/$dir/$dir2";
 			for (   readdir QDIR ){
-				-f $_ or next;
-				mylog "$$ reprioritizing queue/$dir/$dir2/$_\n";
+				-f "$basedir/queue/$dir/$dir2/$_" or next;
+				mylog "reprioritizing queue/$dir/$dir2/$_";
 				rename "$basedir/queue/$dir/$dir2/$_", "$basedir/immediate/$_";
 			};
-			mylog "$$ removing directory queue/$dir/$dir2\n";
+			mylog "removing inner directory queue/$dir/$dir2";
 			rmdir "$basedir/queue/$dir/$dir2";
 		};
 	};	
@@ -241,10 +270,41 @@ use Socket;
 	return map {/\d+ (\S+)/; $1} @mxresults;
 };};
 
-sub getresponse(){
+# my $calls;
+# sub SOCKready(){
+#         my $rin='';	
+#         vec($rin,fileno('SOCK'),1) = 1;	
+# 	my ($n, $tl) = select(my $r=$rin,undef,undef,0.25);
+# 	print "$calls\n";
+# 	$calls++ > 200 and exit;
+# 	return $n;
+# };
+
+sub getresponse($){
+	mylog "sending: [$_[0]]";
+	alarm 60;
+	print SOCK $_[0],CRLF or return undef;
 	my ($dash,$response) = ('-','');
 	while($dash eq '-'){
-		my $line = <SOCK>;
+		my $line;
+		my $i=0;
+		my @letters;
+		my $letter;
+		my $more = 1;
+		my $BOL = 1;	# "beginning of line"
+		do {
+			sysread(SOCK,$letter,1);
+			if ($letter eq "\r" or $letter eq "\n"){
+				$more = $BOL;
+			}else{
+				$BOL = 0;
+				$letters[$i++] = $letter;
+			};
+		} while( $more );
+
+		$line = join('',@letters);
+
+		mylog "received: [$line]";
 		$response .= $line;
 		($dash) = $line =~ /^\d+([\-\ ])/;
 	};
@@ -255,14 +315,14 @@ sub getresponse(){
 sub attempt{
 	# deliver and delete, or requeue; also send bounces if appropriate
 	my $message = shift;
-	mylog "$$ Attempting $ReturnAddress -> $Recipient\n";
+	mylog "Attempting [$ReturnAddress] -> [$Recipient]";
 	# Message Data is supposed to start on third line
 
 	my ($Domain) = $Recipient =~ /\@(\S+)/ or goto GoodDelivery;
 
 	my @dnsmxes;
 	@dnsmxes = dnsmx($Domain);
-	mylog "$$ MX: @dnsmxes\n";
+	mylog "$Domain MX handled by @dnsmxes";
 	my $Peerout;
 
 	my $line;
@@ -270,6 +330,7 @@ sub attempt{
 	TryAgain:
 
 	while($Peerout = shift @dnsmxes){
+		mylog "attempting $Peerout";
 
 		# connect to $Peerout, smtp
 		my @GHBNres = gethostbyname($Peerout) or next;
@@ -282,7 +343,7 @@ sub attempt{
 			or die "$$ socket: $!";
 
 		connect(SOCK, $paddr)  || next ;
-		mylog "$$ connected to $Peerout\n";
+		mylog "connected to $Peerout";
          	my $oldfh = select(SOCK); $| = 1; select($oldfh);
 		goto SMTPsession;
 
@@ -295,80 +356,96 @@ sub attempt{
 	SMTPsession:	
 
         # expect 220
-        $line = getresponse;
         alarm 60;
-        mylog "$$ $line";
+        $line = <SOCK>;
+        mylog "$line";
 	unless($line =~ /^2/){
-		mylog "$$ Weird greeting: [$line]\n";
+		mylog "Weird greeting: [$line]";
 		close SOCK;
 		goto TryAgain;
 	};
-	mylog "$$ $line\n";
 
-        print SOCK "HELO $MyDomain\r\n";
+        # print SOCK "HELO $MyDomain",CRLF;
         # expect 250
-        $line = getresponse;
-        alarm 60;
-        mylog "$$ $line";
+        $line = getresponse "HELO $MyDomain" or goto TryAgain;
         unless($line =~ /^250 /){
-		mylog "$$ peer not happy with HELO: [$line]\n";
+		mylog "peer not happy with HELO: [$line]";
+		close SOCK;
+		goto TryAgain;
+	};
+        # print SOCK "RSET",CRLF;
+        $line = getresponse "RSET" or goto TryAgain;
+        # expect 250
+        # $line = getresponse;
+	# mylog "RSET and got [$line]";
+        unless($line =~ /^250 /){
+		mylog "peer not happy with RSET: [$line]\n";
 		close SOCK;
 		goto TryAgain;
 	};
 
-        print SOCK "MAIL FROM: <$ReturnAddress>\r\n";
+
+	# mylog("$$ return address [$ReturnAddress]\n");
+
+	#$ReturnAddress =~ m/^\s*()([^\<\>\s]+)\s*$/	# "user@domain"
+	#or
+	#$ReturnAddress =~ m/^\s*([^\<]*)\<([^\>]*)/	# "name <user@domain>"
+	#or
+	#$ReturnAddress =~ m/^\s*()([^\>]*)/		# "<user@domain>"
+	;
+	# mylog("return address parses into [$1<$2>]");
+        # print SOCK "MAIL FROM: $1<$2>",CRLF;
         # expect 250
-        $line = getresponse;
-        alarm 60;
-        mylog "$$ $line";
+        # $line = getresponse "MAIL FROM: $1<$2>"  or goto TryAgain;
+        $line = getresponse "MAIL FROM: $ReturnAddress"  or goto TryAgain;
+        mylog "$line";
+        unless($line =~ /^[2]/){
+		mylog "peer not happy with return address: [$line]";
+		if ($line =~ /^[4]/){
+			goto ReQueue;
+		};
+		if ($line =~ /^[5]/){
+			goto Bounce;
+		};
+		mylog "and response was neither 2,4 or 5 coded.";
+		goto TryAgain;
+	};
+
+        # print SOCK "RCPT TO: <$Recipient>\r\n";
+        # expect 250
+        $line = getresponse "RCPT TO: $Recipient" or goto TryAgain;
         unless($line =~ /^2/){
-		mylog "$$ peer not happy with return address: [$line]\n";
+		mylog "peer not happy with recipient: [$line]";
 		if ($line =~ /^4/){
 			goto ReQueue;
 		};
 		if ($line =~ /^5/){
 			goto Bounce;
 		};
-		mylog "$$ reporting noncompliant SMTP peer [$Peerout]\n";
-		goto TryAgain;
-	};
-
-        print SOCK "RCPT TO: <$Recipient>\r\n";
-        # expect 250
-        $line = getresponse;
-        alarm 60;
-        mylog "$$ $line";
-        unless($line =~ /^2/){
-		mylog "$$ peer not happy with recipient: [$line]\n";
-		if ($line =~ /^4/){
-			goto ReQueue;
-		};
-		if ($line =~ /^5/){
-			goto Bounce;
-		};
-		mylog "$$ reporting noncompliant SMTP peer [$Peerout]\n";
+		mylog "reporting noncompliant SMTP peer [$Peerout]";
 		goto TryAgain;
 	};
 
 
-        print SOCK "DATA\r\n";
+        # print SOCK "DATA\r\n";
         # expect 354
-        $line = getresponse;
-        alarm 60;
-        mylog "$$ $line";
+        $line = getresponse 'DATA' or goto TryAgain;
         unless($line =~ /^354 /){
-		mylog "$$ peer not happy with DATA: [$line]\n";
+		mylog "peer not happy with DATA: [$line]";
 		if ($line =~ /^4/){
 			goto ReQueue;
 		};
 		if ($line =~ /^5/){
 			goto Bounce;
 		};
-		mylog "$$ reporting noncompliant SMTP peer [$Peerout]\n";
+		mylog "reporting noncompliant SMTP peer [$Peerout]";
 		goto TryAgain;
 	};
-
+	my $linecount;
+	my $bytecount;
 	while (<MESSAGE>){
+		$linecount++;
+		$bytecount += length;
 		chomp;
         	alarm 60;
 		if ($_ eq '.'){
@@ -377,28 +454,26 @@ sub attempt{
 			print SOCK $_,"\r\n";
 		};
 	};
-	print SOCK ".\r\n";
+	# print SOCK ".\r\n";
         # expect 250
-        $line = getresponse;
-        alarm 60;
-        mylog "$$ $line";
-        unless($line =~ /^2 /){
-		mylog "$$ peer not happy with message body: [$line]\n";
+	mylog "$linecount lines ($bytecount chars) of message data";
+        $line = getresponse '.' or goto TryAgain;
+        unless($line =~ /^2/){
+		mylog "peer not happy with message body: [$line]";
 		if ($line =~ /^4/){
 			goto ReQueue;
 		};
 		if ($line =~ /^5/){
 			goto Bounce;
 		};
-		mylog "$$ reporting noncompliant SMTP peer [$Peerout]\n";
+		mylog "reporting noncompliant SMTP peer [$Peerout]";
 		goto TryAgain;
 	};
 
-	mylog "$$ $Peerout: $line\n";
 	goto GoodDelivery;
 
 	ReQueue:
-	print SOCK "quit\r\n";
+	getresponse 'QUIT';
 	close SOCK;
 	$message->requeue($line);
 	return undef;
@@ -433,7 +508,7 @@ EOF
 	rename "$basedir/temp/$filename","$basedir/immediate/$filename";
 
 	GoodDelivery:
-	print SOCK "quit\r\n";
+        getresponse 'QUIT';
 	close SOCK;
 	return unlink $$message;	# "true"
 
@@ -514,8 +589,10 @@ EOF
 		$message->deferralmessage("Will keep attempting until message is over a week old");
 	};
 
-	my $futuretime = time + ( $age * ( 3 + rand(2)) / 4);
-	my ($dir,$subdir) = $futuretime =~ m/^(\d+)(\d\d)\d\d$/;
+	my $futuretime = int(time + 100 + ( $age * ( 3 + rand(2)) / 4));
+	# print "futuretime will be $futuretime\n";
+	my ($dir,$subdir) = ($futuretime =~ m/^(\d+)(\d\d)\d\d$/);
+	# print "dir,subdir is $dir,$subdir\n";
 	
 	-d "$basedir/queue/$dir"
 	or mkdir "$basedir/queue/$dir", 0777
@@ -526,6 +603,7 @@ EOF
 	or croak "$$ Permissions problems: $basedir/queue/$dir/$subdir [$!]\n";
 
 	rename $$message, "$basedir/queue/$dir/$subdir/$fname";
+	mylog "message queued to $basedir/queue/$dir/$subdir/$fname";
 
 
 };
@@ -665,6 +743,14 @@ interval.
 =item 0.05 22 April 2003
 
 slight code and documentation cleanup
+
+=item 0.06 6 May 2003
+
+Testing, testing, testing!  make test on TipJar::MTA::queue before
+making test on this module, and you will send me two e-mails.  Now
+using Sys::Hostname instead of `hostname` and gracefully handling
+absolutely any combination of carriage-returns and line-feeds
+as valid line termination.
 
 =back
 
