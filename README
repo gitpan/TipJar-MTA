@@ -1,9 +1,14 @@
-TipJar/MTA version 0.01
+TipJar/MTA version 0.14
 =======================
 
 An outgoing SMTP system. All messages live in their own files
 under a directory that should be on a file system big enough to hold
 everything.
+
+We keep track of bad addresses, domains we failed to connect to,
+and queued messages with connection problems by domain, in additional
+files.  See the HISTORY section of the pod in the main module for
+the full (and hopefully not growing too much more!) feature list.
 
 Messages that receive 400-level error codes (temporary delivery
 failure) will be retried at increasing random intervals for a

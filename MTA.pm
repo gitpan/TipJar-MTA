@@ -19,7 +19,12 @@ use vars qw/
 	$timeout
 	$Domain $line
 	$ConnectionProblem $dateheader
+	$dnsmxpath $ConRetryDelay $ReuseQuota $ReuseQuotaInitial
 /;
+
+$ConRetryDelay = 17 * 60 ;
+$dnsmxpath = 'dnsmx';
+$ReuseQuotaInitial = 20;
 
 
 # tie my $dateheader, 'TipJar::MTA::dateheader';
@@ -37,7 +42,7 @@ use Fcntl ':flock'; # import LOCK_* constants
 $interval = 17;
 $AgeBeforeDeferralReport = 4 * 3600; # four hours
 
-$VERSION = '0.13';
+$VERSION = '0.14';
 
 $SIG{CHLD} = 'IGNORE';
 
@@ -97,10 +102,6 @@ sub run(){
 	my $string = 'a' ;
 	$Recipient = '';
 
-	$SIG{ALRM} = sub { mylog 'TIMEOUT -- caught alarm signal'; 
-			$timeout = 1;
-			};
-
 	-d $basedir
 		or mkdir $basedir,0770
 		or die "could not mkdir $basedir: $!" ;
@@ -131,6 +132,11 @@ sub run(){
 	-d "$basedir/5error"
 		or mkdir "$basedir/5error",0770
 		or die "could not mkdir $basedir/5error: $!" ;
+
+	# conerror dir contains domains we are having trouble connecting to.
+	-d "$basedir/conerror"
+		or mkdir "$basedir/conerror",0770
+		or die "could not mkdir $basedir/conerror: $!" ;
 
 	# temp dir contains message objects under construction
 	-d "$basedir/temp" or mkdir "$basedir/temp",0770
@@ -339,8 +345,29 @@ sub cachepurge(){
 	};
 	mylog "purged 4XX,5XX cache and eliminated $purgecount entries";
 
+	opendir DIR, "$basedir/conerror/";
+	foreach(readdir DIR){ concachetest $_; };
+
 };
 
+
+sub concache($){
+	mylog "caching connection failure to $_[0]";
+	open TOUCH, ">>$basedir/conerror/$_[0]";
+	print TOUCH '.';
+	close TOUCH;
+};
+
+sub concachetest($){
+	-f "$basedir/conerror/$_[0]" or return undef;
+	my @SR = stat(_);
+	( time() - $SR[9] ) < $ConRetryDelay and return 1;
+
+	mylog "ready to try connecting to $_[0] again";
+	unlink "$basedir/conerror/$_[0]";
+
+	undef;
+};
 
 sub cache4($){
 	mylog "caching ",$_[0],$line;
@@ -422,7 +449,7 @@ use Socket;
 
 { no warnings; sub dnsmx($){
 	# look up MXes for domain
-	my @mxresults = sort {$a <=> $b} `dnsmx $_[0]`;
+	my @mxresults = sort {$a <=> $b} `$dnsmxpath $_[0]`;
 	# djbdns program dnsmx provides lines of form /\d+ $domain\n
 	return map {/\d+ (\S+)/; $1} @mxresults;
 };};
@@ -540,6 +567,7 @@ EOF
 # end sub deferralmessage
 
 sub attempt{
+	$onioning or $ReuseQuota = $ReuseQuotaInitial;
 	$line='';
 	$ConnectionProblem = 0;
 	# deliver and delete, or requeue; also send bounces if appropriate
@@ -564,6 +592,10 @@ sub attempt{
 	# $Domain is now defined
 	########################################
 
+	if (concachetest $Domain){
+		mylog "$Domain connection failure cached";
+		goto ReQueue_unconnected;
+	};
 
 	my @dnsmxes;
 	@dnsmxes = dnsmx($Domain);
@@ -612,6 +644,7 @@ sub attempt{
 
 	};
 
+	concache $Domain;
 	mylog "Unable to establish SMTP connection to $Domain MX";
 	$ConnectionProblem = 1;
 	goto ReQueue_unconnected;
@@ -619,6 +652,15 @@ sub attempt{
 
 	# talk SMTP
 	SMTPsession:	
+	$SIG{ALRM} =
+	sub { mylog 'TIMEOUT -- caught alarm signal in attempt()'; 
+			$message->requeue( "timed out during SMTP interaction" );
+			unlink $$message;	# "true"
+			$onioning and unlink 
+				"$basedir/domain/$Domain.$$";
+			exit;
+	};
+
 
         # expect 220
         alarm 60;
@@ -654,7 +696,6 @@ sub attempt{
 		close SOCK;
 		goto TryAgain;
 	};
-        # print SOCK "RSET",CRLF;
 
 	HaveSOCK:
 	$line = getresponse "RSET" or goto TryAgain;
@@ -663,9 +704,10 @@ sub attempt{
         # $line = getresponse;
 	# mylog "RSET and got [$line]";
         unless($line =~ /^250[ \-]/){
-		mylog "peer not happy with RSET: [$line]\n";
-		close SOCK;
-		goto TryAgain;
+		mylog "peer not happy with RSET: [$line] will not reuse this connection";
+		$ReuseQuota =  0;
+		# close SOCK;
+		# goto TryAgain;
 	};
 
 
@@ -818,6 +860,7 @@ EOF
 	unlink $$message;	# "true"
 
 	alarm 0;
+	$onioning and return;
 	if( -f "$basedir/domain/$Domain"){
 		open DOMAINLOCK, ">>$basedir/domain/.lock";
 		flock DOMAINLOCK, LOCK_EX;
@@ -831,6 +874,19 @@ EOF
 		while (<DOMAINLIST>){
 			chomp;
 			-f $_ or next;
+			if( --$ReuseQuota < 0 or eofSOCK ){	# no more socket reuse.
+				open MOREDOMAIN, ">>$basedir/domain/$Domain";
+				flock MOREDOMAIN, LOCK_EX;
+				seek MOREDOMAIN,2,0;
+					while (<DOMAINLIST>){
+						chomp;
+						-f $_ or next;
+						print MOREDOMAIN "$_\n";
+					};
+				flock MOREDOMAIN, LOCK_UN;
+				close MOREDOMAIN;
+				last;
+			};
 			mylog "reusing sock with $_";
 			my $M = newmessage $_; # sets some globals
 			$M or next;
@@ -840,7 +896,6 @@ EOF
 		$onioning--;
 	};
 	
-	$onioning and return;
 
 	eofSOCK or mylog getresponse 'QUIT';
 	close SOCK;
@@ -854,7 +909,7 @@ sub requeue{
 	my $reason = shift;
 	my ($fdir,$fname) = $$message =~ m#^(.+)/([^/]+)$#;
 	my @stat = stat($$message);
-	my $age = time - $stat[9];
+	my $age = time() - $stat[9];
 
 	if ($age > OneWeek){
 
@@ -1190,6 +1245,24 @@ they send their 220 greeting. And several "uninitialized value" warnings.
 
 Adding a framework for remembering and caching recipient-based 4* and 5* errors
 for four hours.
+
+=item 0.14 23 July 2003
+
+the path to the dnsmx program is now configurable through
+a global variable C<$TipJar::MTA::dnsmxpath>
+
+The dependency on the dateheader package is now in the Makefile.PL
+
+we now remember domains we have had trouble connecting to and wait
+at least C<$TipJar::MTA::ConRetryDelay> seconds
+(defaults to seventeen minutes) after a failed
+connection attempt before trying again.
+
+We can handle peers that don't know what to do with a C<RSET>
+command.  It no longer shuts us down, rather we remember that
+the peer doesn't know how to reset its buffers and we prefer not
+to reuse a socket when sending them messages.
+
 
 =back
 
