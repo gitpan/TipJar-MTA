@@ -8,8 +8,8 @@
 use Test;
 BEGIN { plan tests => 7 };
 use TipJar::MTA ;
+$Tipjar::MTA::LogToStdout = 1;
 ok(1); # If we made it this far, we're ok.
-
 
 #########################
 
@@ -42,13 +42,17 @@ unless($other2){
 	TipJar::MTA::run();
 }else{
 	print "$$: $other2 should exit because of ${other}'s pidfile\n";
-	sleep 1;
+	sleep 2;
 	print "$$ $other2 should have exited\n";
 	ok(! kill 0 => $other2);
 };
 sleep 2;
 print "$$ signalling $other\n";
 ok(kill ALRM => $other);
+sleep 1;
 print "$$ $other should have exited\n";
 ok(! kill 0 => $other);
-sleep 1;
+
+
+
+

@@ -7,11 +7,16 @@ use Carp;
 
 require Exporter;
 
-use vars qw/$VERSION $MyDomain $interval $basedir $ReturnAddress $Recipient/;
+use vars qw/$VERSION $MyDomain $interval $basedir
+	 $ReturnAddress $Recipient 
+	$AgeBeforeDeferralReport
+	$LogToStdout
+/;
 use Fcntl ':flock'; # import LOCK_* constants
 $interval = 17;
+$AgeBeforeDeferralReport = 4 * 3600; # four hours
 
-$VERSION = '0.03';
+$VERSION = '0.04';
 
 $SIG{CHLD} = 'IGNORE';
 
@@ -29,10 +34,24 @@ sub import{
 	$basedir ||= './MTAdir';
 };
 
-END {
-	print "$$ exiting\n";
+$LogToStdout = 0;
+
+sub mylog(@){
+	open LOG, ">>$basedir/log/current" or print @_ and return;
+	flock LOG, LOCK_EX;
+	if($LogToStdout){
+		seek STDOUT,2,0;
+		print @_;
+	}else{
+		seek LOG,2,0;
+		print LOG @_;
+	};
+	flock LOG, LOCK_UN;	# flushes before unlocking
 };
 
+END {
+	mylog "$$ exiting\n";
+};
 
 sub run(){
 
@@ -41,6 +60,11 @@ sub run(){
 		or die "could not mkdir $basedir: $!" ;
 
 	-w $basedir or croak "base dir <$basedir> must be writable!";
+
+	# log dir contains logs (duh)
+	-d "$basedir/log"
+		or mkdir "$basedir/log",0770
+		or die "could not mkdir $basedir/log: $!" ;
 
 	# queue dir contains deferred messageobjects
 	-d "$basedir/queue"
@@ -59,7 +83,7 @@ sub run(){
 	chomp ( my $oldpid = <PID>);
 
 	if ($oldpid and kill 0, $oldpid){
-		print "$$ MTA process number $oldpid is still running\n";
+		mylog "$$ MTA process number $oldpid is still running\n";
 		exit;
 	};
 
@@ -73,7 +97,7 @@ sub run(){
 	-d "$basedir/immediate" or mkdir "$basedir/immediate",0770;
 
 	# endless top level loop
-	print "$$ starting fork-and-wait loop\n";
+	mylog "$$ starting fork-and-wait loop\n";
 	for(;;){
 		fork or last;
 		sleep $interval;
@@ -81,20 +105,20 @@ sub run(){
 
 
 	$time=time;
-	print "$$ ",~~localtime,"\n";
+	mylog "$$ ",~~localtime,"\n";
 
 	# process new files if any
 	opendir BASEDIR, $basedir;
 	my @entries = readdir BASEDIR;
 	for my $file (@entries){
 		-f "$basedir/$file" or next;
-		print "$$ processing new message file $file\n";
+		mylog "$$ processing new message file $file\n";
 		# expand and write into temp, then try to
 		# deliver each file as it is expanded
 		unless(open MESSAGE0, "<$basedir/$file"){
-			print "$$ Could not open $basedir/$file for reading\n";
+			mylog "$$ Could not open $basedir/$file for reading\n";
 			unless(unlink "$basedir/$file"){
-				print "$$ Could not unlink $basedir/$file\n";
+				mylog "$$ Could not unlink $basedir/$file\n";
 			};
 			next;
 		};
@@ -106,14 +130,14 @@ sub run(){
 		# uncomment the next line
 		# my @MessData = (<MESSAGE0>);
 		unless(unlink "$basedir/$file"){
-			print "$$ Could not unlink $basedir/$file\n";
+			mylog "$$ Could not unlink $basedir/$file\n";
 			next;
 		};
 		# and comment this next line out
 		my @MessData = (<MESSAGE0>);
 
 		my $FirstLine = shift @MessData;
-		print "$$ from $FirstLine";
+		mylog "$$ from $FirstLine";
 		$FirstLine =~ s/\s*<*([^<>\s]*).*$/$1/s;
 
 		my @RecipList;
@@ -123,7 +147,7 @@ sub run(){
 			my $Recip = shift @MessData;
 			$Recip =~ s/\s*<*([^<>\s]+\@[\w\-\.]+).*$/$1/s or last;
 
-			print "$$ for $Recip\n";
+			mylog "$$ for $Recip\n";
 			push @RecipList, $Recip;
 		};
 
@@ -170,7 +194,7 @@ sub run(){
 		    readdir QDIR;
 
 		unless (@directories2){
-			print "$$ removing directory queue/$dir\n";
+			mylog "$$ removing directory queue/$dir\n";
 			rmdir "$basedir/queue/$dir";
 			next;
 		};
@@ -180,10 +204,10 @@ sub run(){
 			opendir QDIR, "$basedir/queue/$dir/$dir2";
 			for (   readdir QDIR ){
 				-f $_ or next;
-				print "$$ reprioritizing queue/$dir/$dir2/$_\n";
+				mylog "$$ reprioritizing queue/$dir/$dir2/$_\n";
 				rename "$basedir/queue/$dir/$dir2/$_", "$basedir/immediate/$_";
 			};
-			print "$$ removing directory queue/$dir/$dir2\n";
+			mylog "$$ removing directory queue/$dir/$dir2\n";
 			rmdir "$basedir/queue/$dir/$dir2";
 		};
 	};	
@@ -229,14 +253,14 @@ sub getresponse(){
 sub attempt{
 	# deliver and delete, or requeue; also send bounces if appropriate
 	my $message = shift;
-	print "$$ Attempting $ReturnAddress -> $Recipient\n";
+	mylog "$$ Attempting $ReturnAddress -> $Recipient\n";
 	# Message Data is supposed to start on third line
 
 	my ($Domain) = $Recipient =~ /\@(\S+)/ or goto GoodDelivery;
 
 	my @dnsmxes;
 	@dnsmxes = dnsmx($Domain);
-	print "$$ MX: @dnsmxes\n";
+	mylog "$$ MX: @dnsmxes\n";
 	my $Peerout;
 
 	my $line;
@@ -256,7 +280,7 @@ sub attempt{
 			or die "$$ socket: $!";
 
 		connect(SOCK, $paddr)  || next ;
-		print "$$ connected to $Peerout\n";
+		mylog "$$ connected to $Peerout\n";
          	my $oldfh = select(SOCK); $| = 1; select($oldfh);
 		goto SMTPsession;
 
@@ -271,21 +295,21 @@ sub attempt{
         # expect 220
         $line = getresponse;
         alarm 60;
-        print $line;
+        mylog "$$ $line";
 	unless($line =~ /^2/){
-		print "$$ Weird greeting: [$line]\n";
+		mylog "$$ Weird greeting: [$line]\n";
 		close SOCK;
 		goto TryAgain;
 	};
-	print "$$ $line\n";
+	mylog "$$ $line\n";
 
         print SOCK "HELO $MyDomain\r\n";
         # expect 250
         $line = getresponse;
         alarm 60;
-        print $line;
+        mylog "$$ $line";
         unless($line =~ /^250 /){
-		print "$$ peer not happy with HELO: [$line]\n";
+		mylog "$$ peer not happy with HELO: [$line]\n";
 		close SOCK;
 		goto TryAgain;
 	};
@@ -294,16 +318,16 @@ sub attempt{
         # expect 250
         $line = getresponse;
         alarm 60;
-        print $line;
+        mylog "$$ $line";
         unless($line =~ /^2/){
-		print "$$ peer not happy with return address: [$line]\n";
+		mylog "$$ peer not happy with return address: [$line]\n";
 		if ($line =~ /^4/){
 			goto ReQueue;
 		};
 		if ($line =~ /^5/){
 			goto Bounce;
 		};
-		print "$$ reporting noncompliant SMTP peer [$Peerout]\n";
+		mylog "$$ reporting noncompliant SMTP peer [$Peerout]\n";
 		goto TryAgain;
 	};
 
@@ -311,16 +335,16 @@ sub attempt{
         # expect 250
         $line = getresponse;
         alarm 60;
-        print $line;
+        mylog "$$ $line";
         unless($line =~ /^2/){
-		print "$$ peer not happy with recipient: [$line]\n";
+		mylog "$$ peer not happy with recipient: [$line]\n";
 		if ($line =~ /^4/){
 			goto ReQueue;
 		};
 		if ($line =~ /^5/){
 			goto Bounce;
 		};
-		print "$$ reporting noncompliant SMTP peer [$Peerout]\n";
+		mylog "$$ reporting noncompliant SMTP peer [$Peerout]\n";
 		goto TryAgain;
 	};
 
@@ -329,16 +353,16 @@ sub attempt{
         # expect 354
         $line = getresponse;
         alarm 60;
-        print $line;
+        mylog "$$ $line";
         unless($line =~ /^354 /){
-		print "$$ peer not happy with DATA: [$line]\n";
+		mylog "$$ peer not happy with DATA: [$line]\n";
 		if ($line =~ /^4/){
 			goto ReQueue;
 		};
 		if ($line =~ /^5/){
 			goto Bounce;
 		};
-		print "$$ reporting noncompliant SMTP peer [$Peerout]\n";
+		mylog "$$ reporting noncompliant SMTP peer [$Peerout]\n";
 		goto TryAgain;
 	};
 
@@ -355,20 +379,20 @@ sub attempt{
         # expect 250
         $line = getresponse;
         alarm 60;
-        print $line;
+        mylog "$$ $line";
         unless($line =~ /^2 /){
-		print "$$ peer not happy with message body: [$line]\n";
+		mylog "$$ peer not happy with message body: [$line]\n";
 		if ($line =~ /^4/){
 			goto ReQueue;
 		};
 		if ($line =~ /^5/){
 			goto Bounce;
 		};
-		print "$$ reporting noncompliant SMTP peer [$Peerout]\n";
+		mylog "$$ reporting noncompliant SMTP peer [$Peerout]\n";
 		goto TryAgain;
 	};
 
-	print "$$ $Peerout: $line\n";
+	mylog "$$ $Peerout: $line\n";
 	goto GoodDelivery;
 
 	ReQueue:
@@ -453,7 +477,11 @@ EOF
 		unlink $$message;
 	};
 
-	if ($reason and $ReturnAddress =~ /\@/ ){ #suppress doublebounces
+	if (
+		$age > $AgeBeforeDeferralReport and
+		$reason and
+		$ReturnAddress =~ /\@/ # suppress doublebounces
+	){
 	my $filename = join '.',time,$$,'bounce',rand(10000000);
 	open BOUNCE, ">$basedir/temp/$filename";
 	print BOUNCE <<EOF;
@@ -513,6 +541,7 @@ TipJar::MTA - outgoing SMTP with exponential random backoff.
   use TipJar::MTA '/var/spool/MTA';	# must be a writable -d
 					# defaults to ./MTAdir
   $TipJar::MTA::interval='100';		# the default is 17
+  $TipJar::MTA::AgeBeforeDeferralReport=3500; # default is 4 hours
   $TipJar::MTA::MyDomain='cpan.org';	# defaults to `hostname`
 					# And awaay we go,
   TipJar::MTA::run();			# logging to STDOUT.
@@ -620,6 +649,15 @@ of dots in them, which could conceivably not be portable.
 	per-domain queues for connection reuse, in order to have
 	a working system ASAP.  Testing kill-zero functionality in
 	test script.
+
+=item 0.04 20 April 2003
+
+	logging to $basedir/log/current instead of stdout, unless
+	$LogToStdout is true.
+	$AgeBeforeDeferralReport
+	variable to suppress deferral
+	bounces when a message has been queued for less than an
+	interval.
 
 =back
 
