@@ -1,8 +1,38 @@
+
+package TipJar::MTA::dateheader;
+
+sub TIESCALAR{
+	my $x;
+	bless \$x;
+};
+@days=qw/Sun Mon Tue Wed Thu Fri Sat/;
+@months=qw/Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec/;
+
+sub FETCH{
+   my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday)
+   =  gmtime(time);
+   #adjust date for printability:
+   $year += 1900;
+   # zero-pad time-of-day components
+   $hour = substr("0$hour", -2);
+   $min = substr("0$min", -2);
+   $sec = substr("0$sec", -2);
+
+   return
+   "Date: $days[$wday], $mday $months[$mon] $year $hour:$min:$sec +0000";
+};
+
+
 package TipJar::MTA;
+
+
+
 
 use strict;
 use warnings;
 use Carp;
+
+tie my $dateheader, 'TipJar::MTA::dateheader';
 
 use vars qw/
 	$VERSION $MyDomain $interval $basedir
@@ -12,6 +42,7 @@ use vars qw/
 	$OnlyOnce
 	$LastChild
 	$TimeStampFrequency
+	$timeout
 /;
 
 $TimeStampFrequency = 200; # just under an hour at 17 seconds each
@@ -24,7 +55,7 @@ use Fcntl ':flock'; # import LOCK_* constants
 $interval = 17;
 $AgeBeforeDeferralReport = 4 * 3600; # four hours
 
-$VERSION = '0.07';
+$VERSION = '0.10';
 
 $SIG{CHLD} = 'IGNORE';
 
@@ -44,7 +75,7 @@ sub import{
 	$basedir ||= './MTAdir';
 };
 
-$LogToStdout = 1;
+$LogToStdout = 0;
 
 {
 my $LogTime = 0;
@@ -64,11 +95,11 @@ sub mylog(@){
 	flock LOG, LOCK_EX or die "flock: $!";
 	if($LogToStdout){
 		seek STDOUT,2,0;
-		print "$$ ",@_;
+		print "$$ $Recipient ",@_;
 		print "\n";
 	}else{
 		seek LOG,2,0;
-		print LOG "$$ ",@_;
+		print LOG "$$ $Recipient ",@_;
 		print LOG "\n";
 	};
 	flock LOG, LOCK_UN;	# flushes before unlocking
@@ -76,13 +107,17 @@ sub mylog(@){
 
 };
 
-END {
-	mylog "exiting";
-};
+# END {
+# 	mylog "exiting";
+# };
 
 sub run(){
 
-	$SIG{ALRM} = sub { die 'TIMEOUT -- caught alarm signal'; };
+	$Recipient = '';
+
+	$SIG{ALRM} = sub { mylog 'TIMEOUT -- caught alarm signal'; 
+			$timeout = 1;
+			};
 
 	-d $basedir
 		or mkdir $basedir,0770
@@ -130,11 +165,11 @@ sub run(){
 		or die "could not mkdir $basedir/immediate: $!" ;
 
 	# endless top level loop
-	mylog "starting fork-and-wait loop";
+	mylog "starting fork-and-wait loop: will launch every $interval seconds.";
 	my $count;
 	for(;;){
-		$count++ % $TimeStampFrequency or
-			mylog(scalar( localtime), $count);
+		++$count % $TimeStampFrequency or
+			mylog(time,": ",scalar( localtime)," ",$count);
 
 		# new child drops out of the waiting loop
 		$LastChild = fork or last;	
@@ -173,6 +208,7 @@ sub run(){
 		};
 
 		my @MessData = (<MESSAGE0>);
+		mylog @MessData;
 
 		chomp(my $FirstLine = shift @MessData);
 		mylog "from [[$FirstLine]]";
@@ -183,11 +219,14 @@ sub run(){
 
 		for(;;){
 			chomp(my $Recip = shift @MessData);
+			unless (@MessData){
+				die "no body in message";
+			};
 			# never mind $Recip =~ s/\s*<*([^<>\s]+\@[\w\-\.]+).*$/$1/s or last;
-			$Recip =~ /\S/ or last;
-
 			mylog "for $Recip";
+			$Recip =~ /\@/ or last;
 			push @RecipList, $Recip;
+			mylog "Recipients: @RecipList";
 		};
 
 
@@ -196,15 +235,11 @@ sub run(){
 			$string++;
 			open TEMP, ">$basedir/temp/$time.$$.$string";
 			print TEMP "$FirstLine\n$Recip\n",@MessData,"\n";
+			close TEMP;
+			rename 
+			"$basedir/temp/$time.$$.$string",
+			"$basedir/immediate/$time.$$.$string";
 		};
-		close TEMP;
-
-
-		for my $String ('b'..$string){
-			my $M = newmessage "$basedir/temp/$time.$$.$String" or next;
-			$M->attempt();	# will skip or requeue or delete
-		};
-
 
 	};
 
@@ -227,7 +262,7 @@ sub run(){
 	for my $dir (@directories){	
 		opendir QDIR, "$basedir/queue/$dir";
 		my @directories2 =
-		    readdir QDIR;
+		    grep { /\w/ } (readdir QDIR);
 
 		unless (@directories2){
 			mylog "removing directory queue/$dir";
@@ -289,44 +324,70 @@ use Socket;
 # 	return $n;
 # };
 
+my $CRLF = CRLF;
+
+sub eofSOCK(){
+
+	seek SOCK, 0, 1;
+	my $syserr = $!;
+	$syserr =~ /^Illegal seek/ and return 0;
+
+	# a seek on a closed socket gives a different error.
+
+	mylog $syserr;
+	return 1;
+};
+
 sub getresponse($){
-	mylog "sending: [$_[0]]";
-	alarm 70;
-	eval{	#perl "try"
-		print SOCK $_[0],CRLF or return undef;
-	};
-	if($@){	#perl "catch"
-		mylog $@;
+
+	# mylog "sending: [$_[0]]";
+
+	if(eofSOCK){
+		mylog "problem with SOCK";
 		return undef;
 	};
 
+	$timeout = 0;
+	alarm 130;
+	unless(print SOCK  "$_[0]$CRLF"){
+		mylog "print SOCK: $!";
+		return undef;
+	};
+	# mylog "sent $_[0]";
+
 	my ($dash,$response) = ('-','');
 	while($dash eq '-'){
-		my $line;
-		my $i=0;
-		my @letters;
 		my $letter;
+		my @letters;
+		my $i=0;
 		my $more = 1;
 		my $BOL = 1;	# "beginning of line"
 		do {
-	eval{	#perl "try"
+			if($timeout){
+				mylog "timeout in getresponse";
+				return undef;
+			};
+			if(eofSOCK){
+				mylog "eofSOCK";
+				return undef;
+			};
 			sysread(SOCK,$letter,1);
-	};
-	if($@){	#perl "catch"
-		mylog $@;
-		return undef;
-	};
 			if ($letter eq "\r" or $letter eq "\n"){
 				$more = $BOL;
 			}else{
 				$BOL = 0;
-				$letters[$i++] = $letter;
+				if(length($letter)){
+					$letters[$i++] = $letter;
+					# mylog @letters;
+				}else{
+					sleep 1;
+				};
 			};
 		} while( $more );
 
-		$line = join('',@letters);
+		my $line = join('',@letters);
 
-		mylog "received: [$line]";
+	#	mylog "received: [$line]";
 		$response .= $line;
 		($dash) = $line =~ /^\d+([\-\ ])/;
 	};
@@ -340,11 +401,16 @@ sub attempt{
 	mylog "Attempting [$ReturnAddress] -> [$Recipient]";
 	# Message Data is supposed to start on third line
 
-	my ($Domain) = $Recipient =~ /\@(\S+)/ or goto GoodDelivery;
+	my ($Domain) = $Recipient =~ /\@([^\s>]+)/ or goto GoodDelivery;
 
 	my @dnsmxes;
 	@dnsmxes = dnsmx($Domain);
-	mylog "$Domain MX handled by @dnsmxes";
+	my $dnsmx_count = @dnsmxes;
+	mylog "[[$Domain]] MX handled by @dnsmxes";
+	unless ( @dnsmxes ){
+		mylog "requeueing due to empty dnsmx result";
+		goto ReQueue_unconnected;
+	};
 	my $Peerout;
 
 	my $line;
@@ -355,7 +421,15 @@ sub attempt{
 		mylog "attempting $Peerout";
 
 		# connect to $Peerout, smtp
-		my @GHBNres = gethostbyname($Peerout) or next;
+		my @GHBNres;
+		unless ( @GHBNres = gethostbyname($Peerout)){
+			if ($dnsmx_count == 1 and
+			    $Peerout eq $Domain){
+				mylog $line="Apparently there is no valid MX for $Domain";
+				goto Bounce;
+			};
+			next;
+		};
 		my $iaddr = $GHBNres[4]	or next;
         	my $paddr   = sockaddr_in(25, $iaddr);
         	socket(SOCK,
@@ -371,8 +445,9 @@ sub attempt{
 
 	};
 
-	$line = "Unable to establish SMTP connection to $Domain MX";
-	goto ReQueue;
+	mylog "Unable to establish SMTP connection to $Domain MX";
+	goto ReQueue_unconnected;
+
 
 	# talk SMTP
 	SMTPsession:	
@@ -395,6 +470,7 @@ sub attempt{
         # print SOCK "HELO $MyDomain",CRLF;
         # expect 250
         $line = getresponse "HELO $MyDomain" or goto TryAgain;
+	mylog $line;
         unless($line =~ /^250 /){
 		mylog "peer not happy with HELO: [$line]";
 		close SOCK;
@@ -412,26 +488,20 @@ sub attempt{
 	};
 
 
-	# mylog("$$ return address [$ReturnAddress]\n");
+	# remove angle brackets if any
+	$ReturnAddress =~ s/^.*<//;
+	$ReturnAddress =~ s/>.*$//;
 
-	#$ReturnAddress =~ m/^\s*()([^\<\>\s]+)\s*$/	# "user@domain"
-	#or
-	#$ReturnAddress =~ m/^\s*([^\<]*)\<([^\>]*)/	# "name <user@domain>"
-	#or
-	#$ReturnAddress =~ m/^\s*()([^\>]*)/		# "<user@domain>"
-	;
-	# mylog("return address parses into [$1<$2>]");
-        # print SOCK "MAIL FROM: $1<$2>",CRLF;
-        # expect 250
-        # $line = getresponse "MAIL FROM: $1<$2>"  or goto TryAgain;
-        $line = getresponse "MAIL FROM: $ReturnAddress"  or goto TryAgain;
+        $line = getresponse "MAIL FROM: <$ReturnAddress>"  or goto TryAgain;
         mylog "$line";
         unless($line =~ /^[2]/){
 		mylog "peer not happy with return address: [$line]";
 		if ($line =~ /^[4]/){
+			mylog "requeueing";
 			goto ReQueue;
 		};
 		if ($line =~ /^[5]/){
+			mylog "bouncing";
 			goto Bounce;
 		};
 		mylog "and response was neither 2,4 or 5 coded.";
@@ -440,13 +510,20 @@ sub attempt{
 
         # print SOCK "RCPT TO: <$Recipient>\r\n";
         # expect 250
-        $line = getresponse "RCPT TO: $Recipient" or goto TryAgain;
+	
+	# remove angle brackets if any
+	$Recipient =~ s/^.*<//;
+	$Recipient =~ s/>.*$//;
+
+        $line = getresponse "RCPT TO: <$Recipient>" or goto TryAgain;
         unless($line =~ /^2/){
 		mylog "peer not happy with recipient: [$line]";
 		if ($line =~ /^4/){
+			mylog "requeueing";
 			goto ReQueue;
 		};
 		if ($line =~ /^5/){
+			mylog "bouncing";
 			goto Bounce;
 		};
 		mylog "reporting noncompliant SMTP peer [$Peerout]";
@@ -460,9 +537,11 @@ sub attempt{
         unless($line =~ /^354 /){
 		mylog "peer not happy with DATA: [$line]";
 		if ($line =~ /^4/){
+			mylog "requeueing";
 			goto ReQueue;
 		};
 		if ($line =~ /^5/){
+			mylog "bouncing";
 			goto Bounce;
 		};
 		mylog "reporting noncompliant SMTP peer [$Peerout]";
@@ -494,9 +573,11 @@ sub attempt{
         unless($line =~ /^2/){
 		mylog "peer not happy with message body: [$line]";
 		if ($line =~ /^4/){
+			mylog "requeueing";
 			goto ReQueue;
 		};
 		if ($line =~ /^5/){
+			mylog "bouncing";
 			goto Bounce;
 		};
 		mylog "reporting noncompliant SMTP peer [$Peerout]";
@@ -506,8 +587,9 @@ sub attempt{
 	goto GoodDelivery;
 
 	ReQueue:
-	getresponse 'QUIT';
+	mylog getresponse 'QUIT';
 	close SOCK;
+	ReQueue_unconnected:
 	$message->requeue($line);
 	return undef;
 
@@ -517,8 +599,11 @@ sub attempt{
 	my $filename = join '.',time,$$,'bounce',rand(10000000);
 	open BOUNCE, ">$basedir/temp/$filename";
 	print BOUNCE <<EOF;
-MAILER-DAEMON
+<>
 $ReturnAddress
+$dateheader
+From: MAILER-DAEMON
+To: $ReturnAddress
 Subject: delivery failure to <$Recipient>
 Content-type: text/plain
 
@@ -541,7 +626,7 @@ EOF
 	rename "$basedir/temp/$filename","$basedir/immediate/$filename";
 
 	GoodDelivery:
-        getresponse 'QUIT';
+	mylog getresponse 'QUIT';
 	close SOCK;
 	return unlink $$message;	# "true"
 
@@ -560,8 +645,11 @@ sub requeue{
 		my $filename = join '.',time,$$,'bounce',rand(10000000);
 		open BOUNCE, ">$basedir/temp/$filename";
 		print BOUNCE <<EOF;
-MAILER-DAEMON
+<>
 $ReturnAddress
+$dateheader
+From: MAILER-DAEMON
+To: $ReturnAddress
 Subject: delivery failure to <$Recipient>
 Content-type: text/plain
 
@@ -595,8 +683,11 @@ EOF
 	my $filename = join '.',time,$$,'bounce',rand(10000000);
 	open BOUNCE, ">$basedir/temp/$filename";
 	print BOUNCE <<EOF;
-MAILER-DAEMON
+<>
 $ReturnAddress
+$dateheader
+From: MAILER-DAEMON
+To: $ReturnAddress
 Subject: delivery deferral to <$Recipient>
 Content-type: text/plain
 
@@ -634,6 +725,8 @@ EOF
 	-d "$basedir/queue/$dir/$subdir"
 	or mkdir "$basedir/queue/$dir/$subdir", 0777
 	or croak "$$ Permissions problems: $basedir/queue/$dir/$subdir [$!]\n";
+
+	# $fname = FIXME -- something to do with the domain?
 
 	rename $$message, "$basedir/queue/$dir/$subdir/$fname";
 	mylog "message queued to $basedir/queue/$dir/$subdir/$fname";
@@ -793,6 +886,39 @@ and installed a ALRM signal handler, for better handling of time-out
 conditions.  Also added a $TipJar::MTA::TimeStampFrequency variable
 which is how many iterations of the main fork-and-send loop to make
 before logging a timestamp.  The default is 200.
+
+=item 0.08 10 June 2003
+
+minor cleanup.
+
+=item 0.09 12 June 2003
+
+AOL and Yahoo.com and who knows how many other sticklers require
+angle brackets around return addresses and recipients.  Improved
+handling of MXes that we cannot connect to, by defining a
+C<ReQueue_unconnected>
+entry point in addition to the C<ReQueue> one that we had already..
+
+=item 0.09 19 June 2003
+
+We now bounce mail to domains that ( have no MX records OR there
+is only one MX record and it is the same as the domain name ) AND
+we could not resolve the one name. Previously it had been given
+the full benefit of the doubt.
+
+
+=item 0.10 24 June 2003
+
+Better handling of slow peers.  C<sysread> does not block and C<eof> cannot
+be used on sockets, did you know that?  We check for socket openness by
+seeking and looking at the text of the resulting error message.  Instead
+of using an OO interface.  Also timeouts are now handled with a global
+variable instead of C<die> because C<die>ing from a signal handler does
+not get appear to get caught by an eval enclosing the point of execution
+at the time of the signal.  Is this a bug?
+
+Anyway TipJar::MTA.pm has been handling outgoing production e-mail for
+a couple weeks now.
 
 =back
 
