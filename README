@@ -31,11 +31,9 @@ Perl's -I command line option.
 
 DEPENDENCIES
 
-This module uses "dnsmx" from
-the djbdns package (http://cr.yp.to/djbdns) for the lookups
-at this time.  A Net::DNS version would be welcome.  The DNS
-function is abstracted, in the dnsmx() function,
-near the beginning of the module.
+Core perl.
+Net::DNS.
+
 
 COPYRIGHT AND LICENCE
 

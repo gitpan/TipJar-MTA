@@ -1,9 +1,6 @@
 
 package TipJar::MTA;
 
-
-
-
 use strict;
 use warnings;
 use Carp;
@@ -20,16 +17,18 @@ use vars qw/
 	$Domain $line
 	$ConnectionProblem $dateheader
 	$dnsmxpath $ConRetryDelay $ReuseQuota $ReuseQuotaInitial
+	@NoBounceRegexList
 /;
 
 $ConRetryDelay = 17 * 60 ;
-$dnsmxpath = 'dnsmx';
+# $dnsmxpath = 'dnsmx';
 $ReuseQuotaInitial = 20;
 
 
 # tie my $dateheader, 'TipJar::MTA::dateheader';
 use dateheader;
 # BEGIN { print $dateheader; };
+sub concachetest($);
 sub cachepurge();
 
 $TimeStampFrequency = 200; # just under an hour at 17 seconds each
@@ -42,7 +41,18 @@ use Fcntl ':flock'; # import LOCK_* constants
 $interval = 17;
 $AgeBeforeDeferralReport = 4 * 3600; # four hours
 
-$VERSION = '0.14';
+$VERSION = '0.17';
+
+sub VERSION{
+	$_[1] or return $VERSION;
+	$_[1] <= 0.14 and croak
+	'TipJar::MTA now uses Net::DNS instead of dnsmx';
+
+	$_[1] > $VERSION and croak 
+	"you are requesting TipJar::MTA version $_[1] but this is only $VERSION";
+
+	$VERSION;
+};
 
 $SIG{CHLD} = 'IGNORE';
 
@@ -100,7 +110,7 @@ sub mylog(@){
 sub run(){
 
 	my $string = 'a' ;
-	$Recipient = '';
+	undef $Recipient ;
 
 	-d $basedir
 		or mkdir $basedir,0770
@@ -258,6 +268,7 @@ sub run(){
 	for my $file (@entries){
 		my $M = newmessage "$basedir/immediate/$file" or next;
 		$M->attempt();	# will skip or requeue or delete
+		undef $Recipient;
 	};
 
 	# reprioritize deferred messages
@@ -287,7 +298,7 @@ sub run(){
 			opendir QDIR, "$basedir/queue/$dir/$dir2";
 			for (   readdir QDIR ){
 				-f "$basedir/queue/$dir/$dir2/$_" or next;
-				mylog "reprioritizing queue/$dir/$dir2/$_";
+				mylog "immanentizing queue/$dir/$dir2/$_";
 				rename "$basedir/queue/$dir/$dir2/$_", "$basedir/immediate/$_";
 			};
 			mylog "removing inner directory queue/$dir/$dir2";
@@ -447,12 +458,26 @@ sub cache5test($){
 
 use Socket;
 
-{ no warnings; sub dnsmx($){
-	# look up MXes for domain
-	my @mxresults = sort {$a <=> $b} `$dnsmxpath $_[0]`;
-	# djbdns program dnsmx provides lines of form /\d+ $domain\n
-	return map {/\d+ (\S+)/; $1} @mxresults;
+# { no warnings; sub dnsmx($){
+# 	# look up MXes for domain
+# 	my @mxresults = sort {$a <=> $b} `$dnsmxpath $_[0]`;
+# 	# djbdns program dnsmx provides lines of form /\d+ $domain\n
+# 	return map {/\d+ (\S+)/; $1} @mxresults;
+# };};
+
+use Net::DNS;
+{
+my $res   = Net::DNS::Resolver->new;
+sub dnsmx($){
+
+	my $name = shift;
+	my @mx = map {$_->exchange} mx($res,$name);
+	@mx or return ($name);
+
+	return  @mx;
 };};
+
+
 
 # my $calls;
 # sub SOCKready(){
@@ -583,7 +608,7 @@ sub attempt{
 	};
 
 	unless(($Domain) = $Recipient =~ /\@([^\s>]+)/){
-		mylog "no domain in recipient [$Recipient]";
+		mylog "no domain in recipient [$Recipient], discarding message";
 		unlink $$message;
 		return;
 	};
@@ -666,26 +691,23 @@ sub attempt{
         alarm 60;
 	my $Greetingcounter = 0;
 	ExpectGreeting:
-        eval { defined($line = <SOCK>) or die "no line from socket."; };
-	if($@){
-		mylog $@;
-		close SOCK;
-		goto TryAgain;
-	};
-	unless (length $line){
-		sleep 2;
-		if($Greetingcounter++ < 5){
-			goto ExpectGreeting;
-		};
-		goto TryAgain;
-	};
 
-        mylog "greeting: $line";
-	unless($line =~ /^2/){
-		mylog "Weird greeting: [$line]";
-		close SOCK;
-		goto TryAgain;
-	};
+	my @GreetArr = ();
+	do {
+	        eval { defined($line = <SOCK>) or die "no line from socket. [$!]"; };
+	        if($@ or ++$Greetingcounter > 20 ){
+	           mylog @GreetArr,"Error: $@";
+	           close SOCK;
+	           goto TryAgain;
+	        };
+        chomp $line;
+        mylog $line;
+        push @GreetArr, $line;
+       } while (substr($line,0,4) ne '220 ') ; # this condition will enforce greeting compliance
+	
+	$line = join ' / ',@GreetArr;
+	$line =~ s/[\r\n]//g;
+	@GreetArr > 1 and  mylog "extended greeting: $line";
 
         # print SOCK "HELO $MyDomain",CRLF;
         # expect 250
@@ -724,7 +746,6 @@ sub attempt{
 			goto ReQueue;
 		};
 		if ($line =~ /^[5]/){
-			mylog "bouncing";
 			goto Bounce;
 		};
 		mylog "and response was neither 2,4 or 5 coded.";
@@ -748,7 +769,6 @@ sub attempt{
 		};
 		if ($line =~ /^5/){
 			cache5 $Recipient;
-			mylog "bouncing";
 			goto Bounce;
 		};
 		mylog "reporting noncompliant SMTP peer [$Peerout]";
@@ -766,7 +786,6 @@ sub attempt{
 			goto ReQueue;
 		};
 		if ($line =~ /^5/){
-			mylog "bouncing";
 			goto Bounce;
 		};
 		mylog "reporting noncompliant SMTP peer [$Peerout]";
@@ -793,7 +812,7 @@ sub attempt{
 	};
 	# print SOCK ".\r\n";
         # expect 250
-	mylog "$linecount lines ($bytecount chars) of message data";
+	mylog "$linecount lines ($bytecount chars) of message data, sending dot";	 # TryAgain will pop the MX list when there are more than 1 MX
         $line = getresponse '.' or goto TryAgain;
         unless($line =~ /^2/){
 		mylog "peer not happy with message body: [$line]";
@@ -802,7 +821,6 @@ sub attempt{
 			goto ReQueue;
 		};
 		if ($line =~ /^5/){
-			mylog "bouncing";
 			goto Bounce;
 		};
 		mylog "reporting noncompliant SMTP peer [$Peerout]";
@@ -822,6 +840,14 @@ sub attempt{
 	Bounce:
 
 	$ReturnAddress =~ /\@/ or goto GoodDelivery; #suppress doublebounces
+       # grep {$ReturnAddress =~ m/$_/} @NoBounceRegexList and goto GoodDelivery
+       for (@NoBounceRegexList){
+               if($ReturnAddress =~ m/$_/){
+                       mylog "suppressing bounce to <$ReturnAddress>";
+                       goto GoodDelivery;
+               };
+       };
+       mylog "bouncing to <$ReturnAddress>";
 	my $filename = join '.',time(),'bounce',rand(10000000);
 	open BOUNCE, ">$basedir/temp/$filename";
 	defined($line) or $line='unknown reason';
@@ -857,11 +883,16 @@ EOF
 	rename "$basedir/temp/$filename","$basedir/immediate/$filename";
 
 	GoodDelivery:
+	undef $Recipient;
 	unlink $$message;	# "true"
 
 	alarm 0;
-	$onioning and return;
+	if($onioning){
+	        mylog "already onioning";
+	        return;
+	};
 	if( -f "$basedir/domain/$Domain"){
+		mylog "onioning $Domain";
 		open DOMAINLOCK, ">>$basedir/domain/.lock";
 		flock DOMAINLOCK, LOCK_EX;
 		rename "$basedir/domain/$Domain","$basedir/domain/$Domain.$$";
@@ -891,9 +922,12 @@ EOF
 			my $M = newmessage $_; # sets some globals
 			$M or next;
 			$M->attempt();
+			undef $Recipient;
 		};
 		unlink "$basedir/domain/$Domain.$$";
 		$onioning--;
+	}else{
+	        mylog "no onion file for $Domain";
 	};
 	
 
@@ -1064,6 +1098,11 @@ TipJar::MTA - outgoing SMTP with exponential random backoff.
   $TipJar::MTA::TimeStampFrequency='35';	# the default is 200
   $TipJar::MTA::AgeBeforeDeferralReport=7000;	# default is 4 hours
   $TipJar::MTA::MyDomain='peanut.af.mil';	# defaults to `hostname`
+                # bouces to certain matching addresses can be suppressed.
+  @TipJar::MTA::NoBounceRegexList = map { qr/$_/} (
+         '^MDA-bounce-recipient\@tipjar.com$',
+         '^RAPNAP\+challenge\+sent\+to\+.+==.+\@pay2send.com$'
+    );
 					# And away we go,
   TipJar::MTA::run();			# logging to /var/spool/MTA/log/current
   
@@ -1121,6 +1160,11 @@ could conceivably be attempted for the final time fifteen and three
 quarters days after it was originally enqueued.  Then it would be
 deleted.
 
+An array of regular expressions can be specified, and if any of
+them match the sender of a bouncing message, the bouncing is
+suppressed, so you don't have to waste time with bounce messages from
+bad addresses you're sending challenges to for instance.
+
 The format for new messages is as follows:
 
 =over 4
@@ -1156,9 +1200,9 @@ None.
 
 =head1 DEPENDENCIES
 
-the C<dnsmx()> function uses the dnsmx program from the djbdns tool package:
-it is abstracted into a function for easy replacement with your preferred
-MX lookup tool.
+the C<dnsmx()> function uses Net::DNS.  Versions 0.14 and previous
+use djbdns' dnsmx tool if that's preferable for you -- the old function
+is commented out.
 
 The file system holding the queue must support reading from a file handle
 after the file has been unlinked from its directory.  If your computer
@@ -1263,6 +1307,19 @@ command.  It no longer shuts us down, rather we remember that
 the peer doesn't know how to reset its buffers and we prefer not
 to reuse a socket when sending them messages.
 
+=item 0.17 15 Feb 2004
+
+rewrote dnsmx() to use Net::DNS 
+
+added @NoBounceRegexList configuration variable, which is a list
+of sender-matching regexes that we don't bounce to -- very useful
+when you're running a C/R system and have a lot of bogus addresses
+you don't care to hear about
+
+We no longer get confused by multi-line greetings, which may have
+been the source of many earlier confusions
+
+log text changes
 
 =back
 
@@ -1283,7 +1340,7 @@ to do from L<cron>.
 
 =item ESMTP
 
-take advantage of post-RFC-821 features
+take advantage of post-RFC-821 features, specifically PIPELINING
 
 =item QMTP
 
