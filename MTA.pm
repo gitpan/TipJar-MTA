@@ -46,7 +46,7 @@ use Fcntl ':flock'; # import LOCK_* constants
 $interval = 17;
 $AgeBeforeDeferralReport = 4 * 3600; # four hours
 
-$VERSION = '0.19';
+$VERSION = '0.20';
 
 sub VERSION{
 	$_[1] or return $VERSION;
@@ -70,23 +70,28 @@ sub newmessage($);
 sub OneWeek(){ 7 * 24 * 3600; };
 sub SixHours(){ 6 * 3600; };
 
-sub RandomSelection($){
-	my $ar = shift;
-	return $ar->[rand @$ar];
+sub Scramble($){
+	my @a = @{shift(@_)};
+	my ($i, $ii);
+	my $max = @a;
+	for($i = 0; $i < $max; $i++){
+		$ii = rand $max;
+		@a[$i,$ii] = @a[$ii.$i];
+	};
+	@a;
 };
 
 sub import{
 	shift;	#package name
 	if (grep {m/^nodns$/i} @_){
-		*mx = sub($$){
-			shift; # lose dummy $res variable
+		*dnsmx = sub($){
 			my $host = lc(shift);
 			if (exists $SMTProutes{$host}){
-				ref($SMTProutes{$host}) and return RandomSelection($SMTProutes{$host});
+				ref($SMTProutes{$host}) and return Scramble($SMTProutes{$host});
 				return $SMTProutes{$host};
 			};
 			if (exists $SMTProutes{SMARTHOST}){
-				ref($SMTProutes{SMARTHOST}) and return RandomSelection($SMTProutes{$host});
+				ref($SMTProutes{SMARTHOST}) and return Scramble($SMTProutes{$host});
 				return $SMTProutes{SMARTHOST};
 			};
 			die "nodns was specified, byt %SMTProutes has no entry for domain <$host>";
@@ -95,6 +100,7 @@ sub import{
 	}else{
 		eval 'use Net::DNS';
 		$res = Net::DNS::Resolver->new;
+		*dnsmx = \&_dnsmx;
 	};
 	$basedir = shift;
 	$basedir ||= './MTAdir';
@@ -516,10 +522,9 @@ use Socket;
 # 	return map {/\d+ (\S+)/; $1} @mxresults;
 # };};
 
-sub mx($$);
 # use Net::DNS;  now in Import
 # now in import   = Net::DNS::Resolver->new;
-sub dnsmx($){
+sub _dnsmx($){
 
 	my $name = shift;
 	my @mx = map {$_->exchange} mx($res,$name);
@@ -1278,7 +1283,7 @@ of dots in them, which could conceivably not be portable.
 
 =head1 NODNS OPERATION
 
-beginning with version 0.19, the dependency on Net::DNS can be
+beginning with version 0.20, the dependency on Net::DNS can be
 skipped by including the term "nodns" on the use line, after the
 MTAdir, which must appear, to avoid changing the interface.  When
 nodns is declared, all MX lookups will be directly from the
@@ -1301,7 +1306,7 @@ per-domain queues for connection reuse, in order to have
 a working system ASAP.  Testing kill-zero functionality in
 test script.
 
-=item 0.04 20 April 2003
+=item 0.04 19 April 2003
 
 logging to $basedir/log/current instead of stdout, unless
 $LogToStdout is true.
@@ -1343,7 +1348,7 @@ handling of MXes that we cannot connect to, by defining a
 C<ReQueue_unconnected>
 entry point in addition to the C<ReQueue> one that we had already..
 
-=item 0.10 19 June 2003
+=item 0.10 20 June 2003
 
 We now bounce mail to domains that ( have no MX records OR there is only one MX record and it is the same as the domain name ) AND we could not resolve the one name. Previously it had been given the full benefit of th doubt.
 
@@ -1409,7 +1414,7 @@ fixed problem with zero-length message files
 
 error code cache cleanup is fixed
 
-=item 0.19 21 May 2007
+=item 0.20 21 May 2007
 
 now support 'nodns' use-line option to suppress loading Net::DNS and SMTProutes hash
 to provide hard-coding of mail exchange paths instead.
