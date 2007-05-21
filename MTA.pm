@@ -20,6 +20,7 @@ use vars qw/
 	@NoBounceRegexList
 	$MaxActiveKids
 	$FourErrCacheLifetime
+	%SMTProutes
 /;
 
 $ConRetryDelay = 17 * 60 ;
@@ -27,6 +28,7 @@ $FourErrCacheLifetime = 7 * 60;
 # $dnsmxpath = 'dnsmx';
 $ReuseQuotaInitial = 20;
 
+my $res; # used by Net::DNS
 
 use dateheader;
 sub concachetest($);
@@ -44,7 +46,7 @@ use Fcntl ':flock'; # import LOCK_* constants
 $interval = 17;
 $AgeBeforeDeferralReport = 4 * 3600; # four hours
 
-$VERSION = '0.18';
+$VERSION = '0.19';
 
 sub VERSION{
 	$_[1] or return $VERSION;
@@ -68,10 +70,35 @@ sub newmessage($);
 sub OneWeek(){ 7 * 24 * 3600; };
 sub SixHours(){ 6 * 3600; };
 
+sub RandomSelection($){
+	my $ar = shift;
+	return $ar->[rand @$ar];
+};
+
 sub import{
 	shift;	#package name
+	if (grep {m/^nodns$/i} @_){
+		*mx = sub($$){
+			shift; # lose dummy $res variable
+			my $host = lc(shift);
+			if (exists $SMTProutes{$host}){
+				ref($SMTProutes{$host}) and return RandomSelection($SMTProutes{$host});
+				return $SMTProutes{$host};
+			};
+			if (exists $SMTProutes{SMARTHOST}){
+				ref($SMTProutes{SMARTHOST}) and return RandomSelection($SMTProutes{$host});
+				return $SMTProutes{SMARTHOST};
+			};
+			die "nodns was specified, byt %SMTProutes has no entry for domain <$host>";
+
+		};	
+	}else{
+		eval 'use Net::DNS';
+		$res = Net::DNS::Resolver->new;
+	};
 	$basedir = shift;
 	$basedir ||= './MTAdir';
+	
 };
 
 $LogToStdout = 0;
@@ -489,9 +516,9 @@ use Socket;
 # 	return map {/\d+ (\S+)/; $1} @mxresults;
 # };};
 
-use Net::DNS;
-{
-my $res   = Net::DNS::Resolver->new;
+sub mx($$);
+# use Net::DNS;  now in Import
+# now in import   = Net::DNS::Resolver->new;
 sub dnsmx($){
 
 	my $name = shift;
@@ -499,7 +526,7 @@ sub dnsmx($){
 	@mx or return ($name);
 
 	return  @mx;
-};};
+};
 
 
 
@@ -1129,6 +1156,19 @@ TipJar::MTA - outgoing SMTP with exponential random backoff.
     );
 					# And away we go,
   TipJar::MTA::run();			# logging to /var/spool/MTA/log/current
+
+alternately,
+
+  use TipJar::MTA '/var/spool/MTA', 'nodns';  # we are sending to
+                                              # a restricted set of domains
+                                              # or using a smarthost
+  %TipJar::MTA::SMTProutes = (
+      SMARTHOST => 'smtp_outbound.internal',  # smarthost for forwarding, can be a list too
+      'example.com' => # mail to example.com will be randomly routed through these three
+          [qw/  smtp1.example.com smtp2.example.com backup-smtp.example.org /],
+      'example.net' => 'bad-dog.example.net'  # all mail to example.net goes to bad-dog
+  );
+
   
 
 =head1 DESCRIPTION
@@ -1235,6 +1275,20 @@ and follow the instructions.
 
 For that matter, we also generate some long file names with lots
 of dots in them, which could conceivably not be portable.
+
+=head1 NODNS OPERATION
+
+beginning with version 0.19, the dependency on Net::DNS can be
+skipped by including the term "nodns" on the use line, after the
+MTAdir, which must appear, to avoid changing the interface.  When
+nodns is declared, all MX lookups will be directly from the
+C<%TipJar::MTA::SMTProutes> hash of array references keyed by
+lowercased domain names.  If the desired domain does not appear,
+the reserved domain name 'SMARTHOST' is looked up as a fallback
+or a list of fallbacks.  If no SMARTHOST is declared, an error
+will be thrown.
+
+The smtproute is selected from the listed routes randomly.
 
 =head1 HISTORY
 
@@ -1345,7 +1399,6 @@ been the source of many earlier confusions
 
 log text changes
 
-
 =item 0.18 30 Mar 2005
 
 new conf variable $MaxActiveKids determines max parallel
@@ -1356,6 +1409,10 @@ fixed problem with zero-length message files
 
 error code cache cleanup is fixed
 
+=item 0.19 21 May 2007
+
+now support 'nodns' use-line option to suppress loading Net::DNS and SMTProutes hash
+to provide hard-coding of mail exchange paths instead.
 
 =back
 
@@ -1369,7 +1426,7 @@ Patches are welcome.
 
 there is no rotation of the log in the C<mylog()> function.
 C<mylog> does
-repoen the file by name on every logging event, though.  Rewriting mylog to
+reopen the file by name on every logging event, though.  Rewriting mylog to
 use L<Unix::Syslog> or L<Sys::Syslog> would be cool, but would add dependencies.
 Mailing the log to the postmaster every once in a while is easy enough
 to do from L<cron>.

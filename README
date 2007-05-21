@@ -1,4 +1,4 @@
-TipJar/MTA version 0.18
+TipJar/MTA version 0.19
 =======================
 
 An outgoing SMTP system. All messages live in their own files
@@ -9,6 +9,10 @@ We keep track of bad addresses, domains we failed to connect to,
 and queued messages with connection problems by domain, in additional
 files.  See the HISTORY section of the pod in the main module for
 the full (and hopefully not growing too much more!) feature list.
+
+as of version 0.19 a %SMTProutes data structure is available
+for per-domain routing or SMARTHOST specification, and the 'nodns'
+use-line parameter will suppress the requirement for Net::DNS.
 
 Messages that receive 400-level error codes (temporary delivery
 failure) will be retried at increasing random intervals for a
@@ -35,13 +39,27 @@ Perl's -I command line option.
 DEPENDENCIES
 
 Core perl.
-Net::DNS.
+Net::DNS. (now optional!)
 
 
 COPYRIGHT AND LICENCE
 
-Copyright (C) 2003,2004,2005 David Nicol / TipJar LLC, released GPL/AL.  It
-gives me great validation to hear of people reusing my efforts,
+Copyright (C) 2003,2004,2005,2007 David Nicol / TipJar LLC.
+
+You may use this software as downloaded, free of charge,
+without any warranty whatsoever.  If you find it necessary
+to modify your copy of TipJar::MTA, please post a diff patch
+file to the bug tracker at
+http://rt.cpan.org/Ticket/Create.html?Queue=TipJar-MTA
+along with a description of what you changed and why.
+
+Please do not distribute modified versions of TipJar::MTA.
+
+It gives me great validation to hear of people reusing my efforts,
 so send a postcard, if you like.  My address is
-Post office box 45163 / Kansas City, Missouri 64171 / USA
+
+    TipJar LLC (attn: MTA v. 0.19)
+    Post office box 45163
+    Kansas City, Missouri 64171-8163
+    United States of America
 
