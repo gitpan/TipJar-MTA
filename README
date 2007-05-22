@@ -1,4 +1,4 @@
-TipJar/MTA version 0.19
+TipJar/MTA version 0.21
 =======================
 
 An outgoing SMTP system. All messages live in their own files
@@ -39,6 +39,7 @@ Perl's -I command line option.
 DEPENDENCIES
 
 Core perl.
+dateheader module for generating rfc-compliant Date header
 Net::DNS. (now optional!)
 
 
@@ -58,8 +59,10 @@ Please do not distribute modified versions of TipJar::MTA.
 It gives me great validation to hear of people reusing my efforts,
 so send a postcard, if you like.  My address is
 
-    TipJar LLC (attn: MTA v. 0.19)
+    TipJar LLC (attn: MTA perl module)
     Post office box 45163
     Kansas City, Missouri 64171-8163
     United States of America
+
+and I can be e-mailed at davidnico@cpan.org.
 

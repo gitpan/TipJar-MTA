@@ -1,9 +1,9 @@
-
 package TipJar::MTA;
 
 use strict;
 use warnings;
 use Carp;
+sub mylog(@);
 
 use vars qw/
 	$VERSION $MyDomain $interval $basedir
@@ -46,7 +46,7 @@ use Fcntl ':flock'; # import LOCK_* constants
 $interval = 17;
 $AgeBeforeDeferralReport = 4 * 3600; # four hours
 
-$VERSION = '0.20';
+$VERSION = '0.21';
 
 sub VERSION{
 	$_[1] or return $VERSION;
@@ -94,7 +94,8 @@ sub import{
 				ref($SMTProutes{SMARTHOST}) and return Scramble($SMTProutes{$host});
 				return $SMTProutes{SMARTHOST};
 			};
-			die "nodns was specified, byt %SMTProutes has no entry for domain <$host>";
+			mylog "nodns: %SMTProutes has no entry for <$host> or SMARTHOST";
+			return $host;
 
 		};	
 	}else{
@@ -115,7 +116,6 @@ my $LogTime = 0;
 sub DLsave($);
 sub DLpurge();
 
-sub mylog(@);
 sub mylog(@){
 
 	if (time - $LogTime > 30){
@@ -146,7 +146,8 @@ $SIG{CHLD} = sub{ $ActiveKids--; wait };
 
 sub run(){
 
-	my $string = 'a' ;
+	my $string if 0 ;
+	INIT{$string = 'a'} ;
 	undef $Recipient ;
 
 	-d $basedir
@@ -244,26 +245,25 @@ sub run(){
 	# process new files if any
 	opendir BASEDIR, $basedir;
 	my @entries = readdir BASEDIR;
+	my $outboundfname if 0;
+	my $outfile;
+	INIT { $outboundfname = 'a' };
 	for my $file (@entries){
 		-f "$basedir/$file" or next;
 		-s "$basedir/$file" or next;
 		mylog "processing new message file $file";
+		rename "$basedir/$file", $outfile = "$basedir/temp/$$-".$outboundfname++.time
+			or do {
+				mylog "could not rename $file: $!";
+				next;
+			};
 		# expand and write into temp, then try to
 		# deliver each file as it is expanded
-		unless(open MESSAGE0, "<$basedir/$file"){
-			mylog "Could not open $basedir/$file for reading";
-			unless(unlink "$basedir/$file"){
-				mylog "Could not unlink $basedir/$file";
-			};
+		unless(open MESSAGE0, "<$outfile"){
+			mylog "CRITICAL: Could not open $outfile for reading";
 			next;
 		};
-
-		flock MESSAGE0, LOCK_EX|LOCK_NB or next;
-
-		unless(unlink "$basedir/$file"){
-			mylog "Could not unlink $basedir/$file";
-			next;
-		};
+		eval " END{ unlink q{$outfile} or mylog q{CRITICAL: could not unlink $outfile}} ";
 
 		my @MessData = (<MESSAGE0>);
 		mylog scalar(@MessData),"lines of message data";
@@ -276,7 +276,7 @@ sub run(){
 		my $Recip;
 
 		for(;;){
-			chomp(my $Recip = shift @MessData);
+			chomp( $Recip = shift @MessData);
 			unless (@MessData){
 				die "no body in message";
 			};
@@ -292,7 +292,7 @@ sub run(){
 			($Domain) = $Recip =~ /\@([\w\-\.]+)/;
 			$Domain =~ y/A-Z/a-z/;
 			$string++;
-			open TEMP, ">$basedir/temp/$time.$$.$string";
+			open TEMP, ">$basedir/temp/$time.$$.$string" or die "FAILURE: $!";
 			print TEMP "$FirstLine\n$Recip\n",@MessData,"\n";
 			close TEMP;
 			rename 
@@ -1417,7 +1417,13 @@ error code cache cleanup is fixed
 =item 0.20 21 May 2007
 
 now support 'nodns' use-line option to suppress loading Net::DNS and SMTProutes hash
-to provide hard-coding of mail exchange paths instead.
+to provide hard-coding of mail exchange paths instead.  And revised the licence.
+
+=item 0.21 22 May 2007
+
+moving newly appeared files from basedir into tempdir with unique names, instead
+of locking them, for all those situations where reading a file that was unlinked
+after it was opened just doesn't work.
 
 =back
 
@@ -1451,6 +1457,10 @@ configuration interface
 
 =back
 
+=head1 LICENSE
+
+see the README file for the license, which has changed.  (you must submit your patches!)
+
 =head1 AUTHOR
 
 David Nicol, E<lt>davidnico@cpan.orgE<gt>
@@ -1460,3 +1470,4 @@ David Nicol, E<lt>davidnico@cpan.orgE<gt>
 L<TipJar::MTA::queue>.
 
 =cut
+
