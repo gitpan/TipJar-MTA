@@ -1,4 +1,4 @@
-TipJar/MTA version 0.21
+TipJar/MTA version 0.30
 =======================
 
 An outgoing SMTP system. All messages live in their own files
@@ -17,6 +17,10 @@ use-line parameter will suppress the requirement for Net::DNS.
 Messages that receive 400-level error codes (temporary delivery
 failure) will be retried at increasing random intervals for a
 week.
+
+New with version 0.30, multiple recipients are multiplexed into
+queued message objects rather than doing qmail-style one-recipient-only
+sending.
 
 use TipJar::MTA::queue to add messages for sending, or simply
 link your properly formatted message into the working directory,

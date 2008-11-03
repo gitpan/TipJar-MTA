@@ -4,514 +4,581 @@ use strict;
 use warnings;
 use Carp;
 sub mylog(@);
+use POSIX qw/strftime/;
 
+BEGIN {
+    if ( $ENV{TJMTADEBUG} ) {
+        eval 'sub DEBUG(){1}';
+    }
+    else {
+        eval 'sub DEBUG(){0}';
+    }
+}
 use vars qw/
-	$VERSION $MyDomain $interval $basedir
-	$ReturnAddress $Recipient 
-	$AgeBeforeDeferralReport
-	$LogToStdout
-	$OnlyOnce
-	$LastChild
-	$TimeStampFrequency
-	$timeout
-	$Domain $line
-	$ConnectionProblem $dateheader
-	$dnsmxpath $ConRetryDelay $ReuseQuota $ReuseQuotaInitial
-	@NoBounceRegexList
-	$MaxActiveKids
-	$FourErrCacheLifetime
-	%SMTProutes
-/;
+  $VERSION $MyDomain $interval $basedir
+  $ReturnAddress $Recipient $InitialRecipCount @Recipients
+  $AgeBeforeDeferralReport
+  $LogToStdout
+  $OnlyOnce
+  $LastChild
+  $TimeStampFrequency
+  $timeout
+  $Domain $line
+  $ConnectionProblem $dateheader
+  $dnsmxpath $ConRetryDelay $ReuseQuota $ReuseQuotaInitial
+  @NoBounceRegexList
+  $MaxActiveKids
+  $FourErrCacheLifetime
+  %SMTProutes
+  /;
 
-$ConRetryDelay = 17 * 60 ;
+$ConRetryDelay        = 17 * 60;
 $FourErrCacheLifetime = 7 * 60;
+
 # $dnsmxpath = 'dnsmx';
 $ReuseQuotaInitial = 20;
 
-my $res; # used by Net::DNS
+my $res;    # used by Net::DNS
 
 use dateheader;
 sub concachetest($);
 sub cachepurge();
 
-$TimeStampFrequency = 200; # just under an hour at 17 seconds each
+$TimeStampFrequency = 200;    # just under an hour at 17 seconds each
 
-$MaxActiveKids = 5; # just how much spam are we sending?
+$MaxActiveKids = 5;           # just how much spam are we sending?
 
-sub CRLF(){
-	"\015\012"
-};
+sub CRLF() {
+    "\015\012";
+}
 
-use Fcntl ':flock'; # import LOCK_* constants
-$interval = 17;
-$AgeBeforeDeferralReport = 4 * 3600; # four hours
+use Fcntl ':flock';           # import LOCK_* constants
+$interval                = 17;
+$AgeBeforeDeferralReport = 4 * 3600;    # four hours
 
-$VERSION = '0.21';
+$VERSION = '0.30';
 
-sub VERSION{
-	$_[1] or return $VERSION;
-	$_[1] <= 0.14 and croak
-	'TipJar::MTA now uses Net::DNS instead of dnsmx';
+sub VERSION {
+    $_[1] or return $VERSION;
+    $_[1] <= 0.14 and croak 'TipJar::MTA now uses Net::DNS instead of dnsmx';
 
-	$_[1] > $VERSION and croak 
-	"you are requesting TipJar::MTA version $_[1] but this is only $VERSION";
+    $_[1] > $VERSION
+      and croak
+      "you are requesting TipJar::MTA version $_[1] but this is only $VERSION";
 
-	$VERSION;
-};
-
+    $VERSION;
+}
 
 use Sys::Hostname;
 
-$MyDomain = ( hostname() || 'sys.hostname.returned.false' );
+my $RealHostName = $MyDomain = ( hostname() || 'sys.hostname.returned.false' );
 
 my $time;
 sub newmessage($);
 
-sub OneWeek(){ 7 * 24 * 3600; };
-sub SixHours(){ 6 * 3600; };
+sub OneWeek()  { 7 * 24 * 3600; }
+sub SixHours() { 6 * 3600; }
 
-sub Scramble($){
-	my @a = @{shift(@_)};
-	my ($i, $ii);
-	my $max = @a;
-	for($i = 0; $i < $max; $i++){
-		$ii = rand $max;
-		@a[$i,$ii] = @a[$ii.$i];
-	};
-	@a;
-};
+sub Scramble($) {
+    my @a = @{ shift(@_) };
+    my ( $i, $ii );
+    my $max = @a;
+    for ( $i = 0 ; $i < $max ; $i++ ) {
+        $ii = rand $max;
+        @a[ $i, $ii ] = @a[ $ii . $i ];
+    }
+    @a;
+}
 
-sub import{
-	shift;	#package name
-	if (grep {m/^nodns$/i} @_){
-		*dnsmx = sub($){
-			my $host = lc(shift);
-			if (exists $SMTProutes{$host}){
-				ref($SMTProutes{$host}) and return Scramble($SMTProutes{$host});
-				return $SMTProutes{$host};
-			};
-			if (exists $SMTProutes{SMARTHOST}){
-				ref($SMTProutes{SMARTHOST}) and return Scramble($SMTProutes{$host});
-				return $SMTProutes{SMARTHOST};
-			};
-			mylog "nodns: %SMTProutes has no entry for <$host> or SMARTHOST";
-			return $host;
+sub import {
+    shift;    #package name
+    if ( grep { m/^nodns$/i } @_ ) {
+        *dnsmx = sub($) {
+            my $host = lc(shift);
+            if ( exists $SMTProutes{$host} ) {
+                ref( $SMTProutes{$host} )
+                  and return Scramble( $SMTProutes{$host} );
+                return $SMTProutes{$host};
+            }
+            if ( exists $SMTProutes{SMARTHOST} ) {
+                ref( $SMTProutes{SMARTHOST} )
+                  and return Scramble( $SMTProutes{$host} );
+                return $SMTProutes{SMARTHOST};
+            }
+            mylog "nodns: %SMTProutes has no entry for <$host> or SMARTHOST";
+            return $host;
 
-		};	
-	}else{
-		eval 'use Net::DNS';
-		$res = Net::DNS::Resolver->new;
-		*dnsmx = \&_dnsmx;
-	};
-	$basedir = shift;
-	$basedir ||= './MTAdir';
-	
-};
+        };
+    }
+    else {
+        eval 'use Net::DNS';
+        $res   = Net::DNS::Resolver->new;
+        *dnsmx = \&_dnsmx;
+    }
+    $basedir = shift;
+    $basedir ||= './MTAdir';
+    DEBUG and warn "basedir will be $basedir";
+
+}
 
 $LogToStdout = 0;
 
 {
-my $LogTime = 0;
+    my $LogTime = 0;
 
-sub DLsave($);
-sub DLpurge();
+    sub DLsave($);
+    sub DLpurge();
 
-sub mylog(@){
+    sub mylog(@) {
 
-	if (time - $LogTime > 30){
-		$LogTime = time;
-		mylog scalar localtime;
-	};
+        if ( time - $LogTime > 30 ) {
+            $LogTime = time;
+            mylog scalar localtime;
+        }
 
-	defined $Recipient or $Recipient='no recipient';
+        defined $Recipient or $Recipient = 'no recipient';
 
-	open LOG, ">>$basedir/log/current" or print(@_,"\n") and return;
-	flock LOG, LOCK_EX or die "flock: $!";
-	if($LogToStdout){
-		seek STDOUT,2,0;
-		print "$$ $Recipient ",@_;
-		print "\n";
-	}else{
-		seek LOG,2,0;
-		print LOG "$$ $Recipient ",@_;
-		print LOG "\n";
-	};
-	flock LOG, LOCK_UN;	# flushes before unlocking
+        open LOG, ">>$basedir/log/current" or print( @_, "\n" ) and return;
+        flock LOG, LOCK_EX or die "flock: $!";
+        if ($LogToStdout) {
+            seek STDOUT, 2, 0;
+            print "$$ $Recipient ", @_;
+            print "\n";
+        }
+        else {
+            seek LOG, 2, 0;
+            print LOG "$$ $Recipient ", @_;
+            print LOG "\n";
+        }
+        flock LOG, LOCK_UN;    # flushes before unlocking
+    }
+
 };
 
-};
+my $ActiveKids = 0;
+$SIG{CHLD} = sub { $ActiveKids--; wait };
 
-my $ActiveKids;
-$SIG{CHLD} = sub{ $ActiveKids--; wait };
+sub recursive_immed($) {       #  "$qdir/$this";
 
-sub run(){
+    # immediatize all files under here, then delete the dir.
+    my $this = shift;
+    my @dirs = ($this);
+    my $e;
+    my @rmdirs;
+    while (@dirs) {
+        $this = shift @dirs;
+        DEBUG and warn "immanentizing $this";
+        opendir RI_DIR, $this;
+        for $e ( readdir RI_DIR ) {
+            $e =~ /^\.\.?$/ and next;
+            my $abs = "$this/$e";
+            if ( -d $abs ) {
+                push @dirs, $abs;
+            }
+            elsif ( -f _ ) {
+                mylog "immanentizing $abs";
+                my $ext = 'Q';
+                my $newname;
+                while ( -e "$basedir/immediate/$e$ext" ) {
+                    $ext++;
+                }
+                rename $abs, "$basedir/immediate/$e$ext"
+                  or mylog "rename failed (with extension $ext): $!";
+            }
+            else {
+                mylog "UNLINKING NONFILE NONDIR $abs";
+                unlink $abs or mylog "UNLINK FAILED: $!";
+            }
+        }
+        unshift @rmdirs, $this;
+    }
+    for $e (@rmdirs) { rmdir $e or mylog "Can't rmdir $e: $!" }
+}
 
-	my $string if 0 ;
-	INIT{$string = 'a'} ;
-	undef $Recipient ;
+sub run() {
 
-	-d $basedir
-		or mkdir $basedir,0770
-		or die "could not mkdir $basedir: $!" ;
+    my $string if 0;
+    INIT { $string = 'a' }
+    undef $Recipient;
 
-	-w $basedir or croak "base dir <$basedir> must be writable!";
+    -d $basedir
+      or mkdir $basedir, 0770
+      or die "could not mkdir $basedir: $!";
 
-	# log dir contains logs (duh)
-	-d "$basedir/log"
-		or mkdir "$basedir/log",0770
-		or die "could not mkdir $basedir/log: $!" ;
+    -w $basedir or croak "base dir <$basedir> must be writable!";
 
-	# queue dir contains deferred messageobjects
-	-d "$basedir/queue"
-		or mkdir "$basedir/queue",0770
-		or die "could not mkdir $basedir/queue: $!" ;
+    # log dir contains logs (duh)
+    -d "$basedir/log"
+      or mkdir "$basedir/log", 0770
+      or die "could not mkdir $basedir/log: $!";
 
-	# domain dir contains lists of queued messages, per domain.
-	-d "$basedir/domain"
-		or mkdir "$basedir/domain",0770
-		or die "could not mkdir $basedir/domain: $!" ;
+    # queue dir contains deferred messageobjects
+    -d "$basedir/queue"
+      or mkdir "$basedir/queue", 0770
+      or die "could not mkdir $basedir/queue: $!";
 
-	# 4error dir contains lists of 4NN-error remote addresses, per domain.
-	-d "$basedir/4error"
-		or mkdir "$basedir/4error",0770
-		or die "could not mkdir $basedir/4error: $!" ;
+    # domain dir contains lists of queued messages, per domain.
+    -d "$basedir/domain"
+      or mkdir "$basedir/domain", 0770
+      or die "could not mkdir $basedir/domain: $!";
 
-	# 5error dir contains lists of 5NN-error remote addresses, per domain.
-	-d "$basedir/5error"
-		or mkdir "$basedir/5error",0770
-		or die "could not mkdir $basedir/5error: $!" ;
+    # 4error dir contains lists of 4NN-error remote addresses, per domain.
+    -d "$basedir/4error"
+      or mkdir "$basedir/4error", 0770
+      or die "could not mkdir $basedir/4error: $!";
 
-	# conerror dir contains domains we are having trouble connecting to.
-	-d "$basedir/conerror"
-		or mkdir "$basedir/conerror",0770
-		or die "could not mkdir $basedir/conerror: $!" ;
+    # 5error dir contains lists of 5NN-error remote addresses, per domain.
+    -d "$basedir/5error"
+      or mkdir "$basedir/5error", 0770
+      or die "could not mkdir $basedir/5error: $!";
 
-	# temp dir contains message objects under construction
-	-d "$basedir/temp" or mkdir "$basedir/temp",0770
-		or die "could not mkdir $basedir/temp: $!" ;
+    # conerror dir contains domains we are having trouble connecting to.
+    -d "$basedir/conerror"
+      or mkdir "$basedir/conerror", 0770
+      or die "could not mkdir $basedir/conerror: $!";
 
+    # temp dir contains message objects under construction
+    -d "$basedir/temp"
+      or mkdir "$basedir/temp", 0770
+      or die "could not mkdir $basedir/temp: $!";
 
-	{	# only one MTA at a time, so we can run this 
-		# from cron
-	open PID, ">>$basedir/temp/MTApid"; # "touch" sort of
-	open PID, "+<$basedir/temp/MTApid"
-		or die "could not open pid file '$basedir/temp/MTApid'";
-	flock PID, LOCK_EX;
-	chomp ( my $oldpid = <PID>);
+    {    # only one MTA at a time, so we can run this
 
-	if ($oldpid and kill 0, $oldpid){
-		print "$$ MTA process number $oldpid is still running\n";
-		mylog "MTA process number $oldpid is still running";
-		exit;
-	};
+        # from cron
+        open PID, ">>$basedir/temp/MTApid";    # "touch" sort of
+        open PID, "+<$basedir/temp/MTApid"
+          or die "could not open pid file '$basedir/temp/MTApid'";
+        flock PID, LOCK_EX;
+        chomp( my $oldpid = <PID> );
 
-	seek PID,0,0;
-	print PID "$$\n";
-	flock PID, LOCK_UN;
-	close PID;
-	}
+        if ( $oldpid and kill 0, $oldpid ) {
+            print "$$ MTA process number $oldpid is still running\n";
+            mylog "MTA process number $oldpid is still running";
+            exit;
+        }
 
-	# immediate dir contains reprioritized deferred objects
-	-d "$basedir/immediate" or mkdir "$basedir/immediate",0770
-		or die "could not mkdir $basedir/immediate: $!" ;
+        seek PID, 0, 0;
+        DEBUG and warn "main proc is $$";
+        print PID "$$\n";
+        flock PID, LOCK_UN;
+        close PID;
+    }
 
-	# endless top level loop
-	mylog "starting fork-and-wait loop: will launch every $interval seconds.";
-	my $count;
-	for(;;){
-		++$count % $TimeStampFrequency or
-			mylog(time,": ",scalar( localtime)," ",$count);
+    # immediate dir contains reprioritized deferred objects
+    -d "$basedir/immediate"
+      or mkdir "$basedir/immediate", 0770
+      or die "could not mkdir $basedir/immediate: $!";
 
-		rand(100) < 1 and cachepurge; # how long is 17000 seconds?
+    # endless top level loop
+    mylog "starting fork-and-wait loop: will launch every $interval seconds.";
+    my $count;
+    for ( ; ; ) {
+        ++$count % $TimeStampFrequency
+          or mylog( time, ": ", scalar(localtime), " ", $count );
 
-		if($ActiveKids > $MaxActiveKids){
-			mylog "$ActiveKids child procs (more than $MaxActiveKids)";
-			sleep (1 + int($interval / 3));
-			next;
-		};
-		# new child drops out of the waiting loop
-		$LastChild = fork or last;
-		$ActiveKids++;
-		if($OnlyOnce){
-			mylog "OnlyOnce flag set to [$OnlyOnce]";
-			return $OnlyOnce;
-		};
-		sleep $interval;
-	};
+        rand(1000) < 1 and cachepurge;    # how long is 17000 seconds?
 
+        if ( $ActiveKids > $MaxActiveKids ) {
+            mylog "$ActiveKids child procs (more than $MaxActiveKids)";
+            sleep( 1 + int( $interval / 3 ) );
+            next;
+        }
 
-	$time=time;
+        # new child drops out of the waiting loop
+        $LastChild = fork or last;
+        $ActiveKids++;
+        if ($OnlyOnce) {
+            mylog "OnlyOnce flag set to [$OnlyOnce]";
+            return $OnlyOnce;
+        }
+        my $slept = 0;
+        while ( $slept < $interval ) {
+            $slept += sleep( 1 + $interval - $slept );
+        }
+    }
 
-	# process new files if any
-	opendir BASEDIR, $basedir;
-	my @entries = readdir BASEDIR;
-	my $outboundfname if 0;
-	my $outfile;
-	INIT { $outboundfname = 'a' };
-	for my $file (@entries){
-		-f "$basedir/$file" or next;
-		-s "$basedir/$file" or next;
-		mylog "processing new message file $file";
-		rename "$basedir/$file", $outfile = "$basedir/temp/$$-".$outboundfname++.time
-			or do {
-				mylog "could not rename $file: $!";
-				next;
-			};
-		# expand and write into temp, then try to
-		# deliver each file as it is expanded
-		unless(open MESSAGE0, "<$outfile"){
-			mylog "CRITICAL: Could not open $outfile for reading";
-			next;
-		};
-		eval " END{ unlink q{$outfile} or mylog q{CRITICAL: could not unlink $outfile}} ";
+    $time = time;
+    DEBUG and warn "queuerunner launched at " . localtime $time;
 
-		my @MessData = (<MESSAGE0>);
-		mylog scalar(@MessData),"lines of message data";
+    # process new files if any
+    opendir BASEDIR, $basedir;
+    my @entries = readdir BASEDIR;
+    my $outboundfname if 0;
+    my $outfile;
+    INIT { $outboundfname = 'a' }
+    for my $file (@entries) {
+        -f "$basedir/$file" or next;
+        -s "$basedir/$file" or next;
+        mylog "processing new message file $file";
+        rename "$basedir/$file",
+          $outfile = "$basedir/temp/$$-" . $outboundfname++ . time
+          or do {
+            mylog "could not rename $file: $!";
+            next;
+          };
+        DEBUG and warn "renamed new message $basedir/$file to $outfile";
 
-		chomp(my $FirstLine = shift @MessData);
-		mylog "from [[$FirstLine]]";
-		# never mind $FirstLine =~ s/\s*<*([^<>\s]*).*$/$1/s;
+        # expand and write into temp, then try to
+        # deliver each file as it is expanded
+        unless ( open MESSAGE0, "<$outfile" ) {
+            mylog "CRITICAL: Could not open $outfile for reading";
+            next;
+        }
+        eval
+" END{ DEBUG and warn q{ unlinking $outfile }; unlink q{$outfile} or mylog q{CRITICAL: could not unlink $outfile}} ";
 
-		my @RecipList;
-		my $Recip;
+        my @MessData = (<MESSAGE0>);
+        mylog scalar(@MessData), "lines of message data";
 
-		for(;;){
-			chomp( $Recip = shift @MessData);
-			unless (@MessData){
-				die "no body in message";
-			};
-			# never mind $Recip =~ s/\s*<*([^<>\s]+\@[\w\-\.]+).*$/$1/s or last;
-			$Recip =~ /\@/ or last;
-			mylog "for $Recip";
-			push @RecipList, $Recip;
-			mylog "Recipients: @RecipList";
-		};
+        chomp( my $FirstLine = shift @MessData );
+        mylog "from [[$FirstLine]]";
 
+        # never mind $FirstLine =~ s/\s*<*([^<>\s]*).*$/$1/s;
 
-		foreach $Recip (@RecipList){
-			($Domain) = $Recip =~ /\@([\w\-\.]+)/;
-			$Domain =~ y/A-Z/a-z/;
-			$string++;
-			open TEMP, ">$basedir/temp/$time.$$.$string" or die "FAILURE: $!";
-			print TEMP "$FirstLine\n$Recip\n",@MessData,"\n";
-			close TEMP;
-			rename 
-			"$basedir/temp/$time.$$.$string",
-			"$basedir/immediate/$time.$$.$string";
-			mylog 
-			DLsave "$basedir/immediate/$time.$$.$string";
-		};
+        my $Recip;
+        my %DOMAIN_MATRIX;
+        my $bestmx;
+        for ( ; ; ) {
+            chomp( $Recip = shift @MessData );
+            DEBUG and warn "recip $Recip";
+            unless (@MessData) {
+                mylog "no body in message file $outfile";
+                die "no body in message file $outfile";
+            }
 
-	};
+            # never mind $Recip =~ s/\s*<*([^<>\s]+\@[\w\-\.]+).*$/$1/s or last;
+            ($Domain) = $Recip =~ /\@([\w\-\.]+)/ or last;
+            ($bestmx) = dnsmx($Domain);
+            mylog "for $Recip (via $bestmx)";
+            push @{ $DOMAIN_MATRIX{$bestmx} }, $Recip;
+        }
 
-	# process all messages in immediate directory
-	opendir BASEDIR, "$basedir/immediate"
-		or die "could not open immediate dir: $!";
-	@entries = readdir BASEDIR;
-	for my $file (@entries){
-		my $M = newmessage "$basedir/immediate/$file" or next;
-		$M->attempt();	# will skip or requeue or delete
-		undef $Recipient;
-	};
+        foreach $bestmx ( keys %DOMAIN_MATRIX ) {
+            DEBUG and warn "mx $bestmx gets @{$DOMAIN_MATRIX{$bestmx}}";
+            $string++;
+            open TEMP, ">$basedir/temp/$time.$$.$string" or die "FAILURE: $!";
+            DEBUG and warn "in $basedir/temp/$time.$$.$string";
+            print TEMP "$FirstLine\n@{$DOMAIN_MATRIX{$bestmx}}\n", @MessData,
+              "\n";
+            close TEMP;
+            rename
+              "$basedir/temp/$time.$$.$string",
+              "$basedir/immediate/$time.$$.$string.$bestmx"
+              or die "rename: $!";
+        }
 
-	# reprioritize deferred messages
-	my($minieon,$microeon) = $time =~ /^(\d+)(\d\d)\d\d$/;
-	opendir QDIR, "$basedir/queue";
-	my @directories =
-	  grep { /^\d+$/ and $_ <= $minieon and -d "$basedir/queue/$_" }
-	    readdir QDIR;
+    }
 
-	for my $dir (@directories){	
-		opendir QDIR, "$basedir/queue/$dir";
-		my @directories2 =
-		    grep { /\w/ } (readdir QDIR);
+    # process all messages in immediate directory
+    opendir BASEDIR, "$basedir/immediate"
+      or die "could not open immediate dir: $!";
+    @entries = readdir BASEDIR;
+    for my $file (@entries) {
+        my $M = newmessage "$basedir/immediate/$file" or next;
+        $M->attempt();    # will skip or requeue or delete
+        undef $Recipient;
+    }
 
-		unless (@directories2){
-			mylog "removing directory queue/$dir";
-			rmdir "$basedir/queue/$dir";
-			next;
-		};
+    # reprioritize deferred messages
+    my $qdir = "$basedir/queue";
 
-		@directories2 = grep {
-	 /\d/ and ($dir * 100 + $_) < ($minieon*100 + $microeon)
-			} @directories2;
+    my @reprime;
+    for my $NEXTPIECE ( split / /, strftime "%Y %m %d %H %M %S", localtime ) {
+        DEBUG and warn "looking at queue dir $qdir";
+        opendir QDIR, $qdir;
+        my $this;
+        while ( defined( $this = readdir QDIR ) ) {
+            if ( -f "$qdir/$this" ) {
+                mylog "immanentizing $qdir/$this";
+                rename "$qdir/$this", "$basedir/immediate/${this}Q";
+                next;
+            }
+            unless ( -d "$qdir/$this" ) {
+                mylog "UNLINKING NONFILE NONDIR $qdir/$this";
+                unlink "$qdir/$this" or mylog "UNLINK FAILED: $!";
+                next;
+            }
 
-		#move files in these directories into the immediate directory
-		for my $dir2 (@directories2){
-			opendir QDIR, "$basedir/queue/$dir/$dir2";
-			for (   readdir QDIR ){
-				-f "$basedir/queue/$dir/$dir2/$_" or next;
-				mylog "immanentizing queue/$dir/$dir2/$_";
-				rename "$basedir/queue/$dir/$dir2/$_", "$basedir/immediate/$_";
-			};
-			mylog "removing inner directory queue/$dir/$dir2";
-			rmdir "$basedir/queue/$dir/$dir2";
-		};
-	};	
-	exit;
-};
+            $this =~ /^\.\.?$/ and next;
 
+            if ( $this < $NEXTPIECE ) {
+                recursive_immed "$qdir/$this";
+            }
+        }
+        $qdir .= "/$NEXTPIECE";
+        -d $qdir or last;
+    }
+
+    exit;
+}
 
 # only one active message per process.
 # (MESSAGE, $ReturnAddress, $Recipient) are all global.
 
+sub newmessage($) {
 
-sub newmessage($){
-	#my $pack = shift;
-	my $messageID = shift;
-	-f $messageID or return undef;
-	-s $messageID or do{
-		# eliminate freeze on zero-length message files
-		unlink $messageID;
-		return undef;
-	};
-	open MESSAGE, "<$messageID" or return undef;
-	flock MESSAGE, LOCK_EX|LOCK_NB or return undef;
-	chomp ($ReturnAddress = <MESSAGE>);
-	chomp ($Recipient = <MESSAGE>);
-	bless \$messageID;
-};
+    #my $pack = shift;
+    my $messageID = shift;
+    -f $messageID or return undef;
+    -s $messageID or do {
+
+        # eliminate freeze on zero-length message files
+        unlink $messageID;
+        return undef;
+    };
+    open MESSAGE, "<$messageID" or return undef;
+    flock MESSAGE, LOCK_EX | LOCK_NB or return undef;
+    chomp( $ReturnAddress = <MESSAGE> );
+    chomp( $Recipient     = <MESSAGE> );
+    @Recipients = split / +/, $Recipient;
+    $InitialRecipCount = @Recipients;
+    bless \$messageID;
+}
 
 my $purgecount;
 sub purgedir($);
-sub purgedir($){
-	my $now = time();
-	my $dir = shift;
-	my $nonempty;
-	my @dirs;
-	opendir SUBDIR, $dir;
-	foreach (readdir SUBDIR){
-		/^\.{1,2}$/ and next;
-		$nonempty = 1; 
-		-d "$dir/$_" and push @dirs, $_;
-		-f "$dir/$_" or next;
-		my @statresult = stat(_);
-		my $mtime = $statresult[9];
-		if(($now - $mtime) > (4 * 60 * 60)){
-			unlink $_;
-			$purgecount++;
-		};	
-	};
-	foreach my $sdir (@dirs) {
-		purgedir("$dir/$sdir");
-	};
-	rmdir $dir unless($nonempty); # patience is a virtue
-};
 
-
-sub cachepurge(){
-	$purgecount = 0;
-	opendir DIR, "$basedir/4error/"	;
-	my @fours = map {"$basedir/4error/$_"} readdir DIR;
-
-	opendir DIR, "$basedir/5error/"	;
-	my @fives = map {"$basedir/5error/$_"} readdir DIR;
-
-	foreach ( @fours, @fives ) {
-		/error\/\.\.?$/  and next;
-		purgedir($_);
-	};
-	mylog "purged 4XX,5XX cache and eliminated $purgecount entries";
-
-	opendir DIR, "$basedir/conerror/";
-	foreach(readdir DIR){ concachetest $_; };
-
-};
-
-
-sub concache($){
-	mylog "caching connection failure to $_[0]";
-	open TOUCH, ">>$basedir/conerror/$_[0]";
-	print TOUCH '.';
-	close TOUCH;
-};
-
-sub concachetest($){
-	-f "$basedir/conerror/$_[0]" or return undef;
-	my @SR = stat(_);
-	( time() - $SR[9] ) < $ConRetryDelay and return 1;
-
-	mylog "ready to try connecting to $_[0] again";
-	unlink "$basedir/conerror/$_[0]";
-
-	undef;
-};
-
-sub cache4($){
-	mylog "caching ",$_[0],$line;
-	my ($user,$host) = split '@',$_[0],2 or return undef;
-	$host =~ y/A-Z/a-z/;
-	$host =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
-	$user =~ y/A-Z/a-z/;
-	$user =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
-	-d "$basedir/4error/$host"
-		or mkdir "$basedir/4error/$host",0770
-		or die "could not mkdir $basedir/4error/$host: $!" ;
-	open CACHE, ">$basedir/4error/$host/$user.TMP$$";
-	print CACHE time(),"\n$line cached ".localtime()."\n";
-	close CACHE;
-	rename "$basedir/4error/$host/$user.TMP$$","$basedir/4error/$host/$user";
-
-}
-sub cache4test($){
-	my ($user,$host) = split '@',$_[0],2 or return undef;
-	$host =~ y/A-Z/a-z/;
-	$host =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
-	$user =~ y/A-Z/a-z/;
-	$user =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
-	-d "$basedir/4error/$host" or return undef;
-	-f "$basedir/4error/$host/$user" or return undef;
-	open CACHE, "<$basedir/4error/$host/$user";
-	my $ctime;
-	($ctime,$line) = <CACHE>;
-	close CACHE;
-	if ((time() - $ctime ) > $FourErrCacheLifetime ){
-		# 4-file is more than seven minutes old
-		unlink "$basedir/4error/$host/$user";
-		return undef;
-	};
-	mylog "4cached ", $line;
-	return $ctime;
+sub purgedir($) {
+    my $now = time();
+    my $dir = shift;
+    my $nonempty;
+    my @dirs;
+    opendir SUBDIR, $dir;
+    foreach ( readdir SUBDIR ) {
+        /^\.{1,2}$/ and next;
+        $nonempty = 1;
+        -d "$dir/$_" and push @dirs, $_;
+        -f "$dir/$_" or next;
+        my @statresult = stat(_);
+        my $mtime      = $statresult[9];
+        if ( ( $now - $mtime ) > ( 4 * 60 * 60 ) ) {
+            unlink $_;
+            $purgecount++;
+        }
+    }
+    foreach my $sdir (@dirs) {
+        purgedir("$dir/$sdir");
+    }
+    rmdir $dir unless ($nonempty);    # patience is a virtue
 }
 
-sub cache5($){
-	mylog "caching ",$_[0],$line;
-	my ($user,$host) = split '@',$_[0],2 or return undef;
-	$host =~ y/A-Z/a-z/;
-	$host =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
-	$user =~ y/A-Z/a-z/;
-	$user =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
-	-d "$basedir/5error/$host"
-		or mkdir "$basedir/5error/$host",0770
-		or die "could not mkdir $basedir/5error/$host: $!" ;
-	open CACHE, ">$basedir/5error/$host/$user.TMP$$" or mylog "CACHEfile: $basedir/5error/$host/$user.TMP$$   $!";
-	print CACHE time(),"\n$line cached ".localtime()."\n";
-	close CACHE;
-	rename "$basedir/5error/$host/$user.TMP$$","$basedir/5error/$host/$user";
+sub cachepurge() {
+    $purgecount = 0;
+    opendir DIR, "$basedir/4error/";
+    my @fours = map { "$basedir/4error/$_" } readdir DIR;
+
+    opendir DIR, "$basedir/5error/";
+    my @fives = map { "$basedir/5error/$_" } readdir DIR;
+
+    foreach ( @fours, @fives ) {
+        /error\/\.\.?$/ and next;
+        purgedir($_);
+    }
+    mylog "purged 4XX,5XX cache and eliminated $purgecount entries";
+
+    opendir DIR, "$basedir/conerror/";
+    foreach ( readdir DIR ) { concachetest $_; }
+
 }
 
-sub cache5test($){
-	my ($user,$host) = split '@',$_[0],2 or return undef;
-	$host =~ y/A-Z/a-z/;
-	$host =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
-	$user =~ y/A-Z/a-z/;
-	$user =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
-	-d "$basedir/5error/$host" or return undef;
-	-f "$basedir/5error/$host/$user" or return undef;
-	open CACHE, "<$basedir/5error/$host/$user";
-	flock CACHE, LOCK_SH;
-	my $ctime;
-	($ctime,$line) = <CACHE>;
-	close CACHE;
-	if ((time() - $ctime ) > ( 4 * 60 * 60 )){
-		# 5-file is more than 4 hours old
-		unlink "$basedir/5error/$host/$user";
-		return undef;
-	};
-	mylog "5cached ", $line;
-	return $ctime;
+sub concache($) {
+    mylog "caching connection failure to $_[0]";
+    open TOUCH, ">>$basedir/conerror/$_[0]";
+    print TOUCH '.';
+    close TOUCH;
 }
 
+sub concachetest($) {
+    -f "$basedir/conerror/$_[0]" or return undef;
+    my @SR = stat(_);
+    ( time() - $SR[9] ) < $ConRetryDelay and return 1;
+
+    mylog "ready to try connecting to $_[0] again";
+    unlink "$basedir/conerror/$_[0]";
+
+    undef;
+}
+
+sub cache4($) {
+    mylog "caching ", $_[0], $line;
+    my ( $user, $host ) = split '@', $_[0], 2 or return undef;
+    $host =~ y/A-Z/a-z/;
+    $host =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+    $user =~ y/A-Z/a-z/;
+    $user =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+    -d "$basedir/4error/$host"
+      or mkdir "$basedir/4error/$host", 0770
+      or die "could not mkdir $basedir/4error/$host: $!";
+    open CACHE, ">$basedir/4error/$host/$user.TMP$$";
+    print CACHE time(), "\n$line cached " . localtime() . "\n";
+    close CACHE;
+    rename "$basedir/4error/$host/$user.TMP$$", "$basedir/4error/$host/$user";
+
+}
+
+sub cache4test($) {
+    my ( $user, $host ) = split '@', $_[0], 2 or return undef;
+    $host =~ y/A-Z/a-z/;
+    $host =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+    $user =~ y/A-Z/a-z/;
+    $user =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+    -d "$basedir/4error/$host"       or return undef;
+    -f "$basedir/4error/$host/$user" or return undef;
+    open CACHE, "<$basedir/4error/$host/$user";
+    my $ctime;
+    ( $ctime, $line ) = <CACHE>;
+    close CACHE;
+
+    if ( ( time() - $ctime ) > $FourErrCacheLifetime ) {
+
+        # 4-file is more than seven minutes old
+        unlink "$basedir/4error/$host/$user";
+        return undef;
+    }
+    mylog "4cached ", $line;
+    return $ctime;
+}
+
+sub cache5($) {
+    mylog "caching ", $_[0], $line;
+    my ( $user, $host ) = split '@', $_[0], 2 or return undef;
+    $host =~ y/A-Z/a-z/;
+    $host =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+    $user =~ y/A-Z/a-z/;
+    $user =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+    -d "$basedir/5error/$host"
+      or mkdir "$basedir/5error/$host", 0770
+      or die "could not mkdir $basedir/5error/$host: $!";
+    open CACHE, ">$basedir/5error/$host/$user.TMP$$"
+      or mylog "CACHEfile: $basedir/5error/$host/$user.TMP$$   $!";
+    print CACHE time(), "\n$line cached " . localtime() . "\n";
+    close CACHE;
+    rename "$basedir/5error/$host/$user.TMP$$", "$basedir/5error/$host/$user";
+}
+
+sub cache5test($) {
+    my ( $user, $host ) = split '@', $_[0], 2 or return undef;
+    $host =~ y/A-Z/a-z/;
+    $host =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+    $user =~ y/A-Z/a-z/;
+    $user =~ s/([^\w\.\-])/'X'.ord($1).'Y'/ge;
+    -d "$basedir/5error/$host"       or return undef;
+    -f "$basedir/5error/$host/$user" or return undef;
+    open CACHE, "<$basedir/5error/$host/$user";
+    flock CACHE, LOCK_SH;
+    my $ctime;
+    ( $ctime, $line ) = <CACHE>;
+    close CACHE;
+
+    if ( ( time() - $ctime ) > ( 4 * 60 * 60 ) ) {
+
+        # 5-file is more than 4 hours old
+        unlink "$basedir/5error/$host/$user";
+        return undef;
+    }
+    mylog "5cached ", $line;
+    return $ctime;
+}
 
 use Socket;
 
@@ -524,21 +591,19 @@ use Socket;
 
 # use Net::DNS;  now in Import
 # now in import   = Net::DNS::Resolver->new;
-sub _dnsmx($){
+sub _dnsmx($) {
 
-	my $name = shift;
-	my @mx = map {$_->exchange} mx($res,$name);
-	@mx or return ($name);
+    my $name = shift;
+    my @mx = map { $_->exchange } mx( $res, $name );
+    @mx or return ($name);
 
-	return  @mx;
-};
-
-
+    return @mx;
+}
 
 # my $calls;
 # sub SOCKready(){
-#         my $rin='';	
-#         vec($rin,fileno('SOCK'),1) = 1;	
+#         my $rin='';
+#         vec($rin,fileno('SOCK'),1) = 1;
 # 	my ($n, $tl) = select(my $r=$rin,undef,undef,0.25);
 # 	print "$calls\n";
 # 	$calls++ > 200 and exit;
@@ -547,85 +612,92 @@ sub _dnsmx($){
 
 my $CRLF = CRLF;
 
-sub eofSOCK(){
-	no warnings;
-	my $hersockaddr    = getpeername(SOCK);
-	if (defined $hersockaddr){
-		return undef;
-	}else{
-		mylog "SOCK not connected";
-		return 1;
-	};
-};
+sub eofSOCK() {
+    no warnings;
+    my $hersockaddr = getpeername(SOCK);
+    if ( defined $hersockaddr ) {
+        return undef;
+    }
+    else {
+        mylog "SOCK not connected";
+        return 1;
+    }
+}
 
-sub getresponse($){
+sub getresponse($) {
 
-	# mylog "sending: [$_[0]]";
+    # mylog "sending: [$_[0]]";
 
-	if(eofSOCK){
-		mylog "problem with SOCK";
-		return undef;
-	};
+    if (eofSOCK) {
+        mylog "problem with SOCK";
+        return undef;
+    }
 
-	$timeout = 0;
-	alarm 130;
-	unless(print SOCK  "$_[0]$CRLF"){
-		mylog "print SOCK: $!";
-		return undef;
-	};
-	# mylog "sent $_[0]";
+    $timeout = 0;
+    alarm 130;
+    unless ( print SOCK "$_[0]$CRLF" ) {
+        mylog "print SOCK: $!";
+        return undef;
+    }
 
-	my ($dash,$response) = ('-','');
-	while($dash eq '-'){
-		my $letter;
-		my @letters;
-		my $i=0;
-		my $more = 1;
-		my $BOL = 1;	# "beginning of line"
-		do {
-			if($timeout){
-				mylog "timeout in getresponse";
-				return undef;
-			};
-			if(eofSOCK){
-				mylog "eofSOCK";
-				return undef;
-			};
-			sysread(SOCK,$letter,1);
-			if ($letter eq "\r" or $letter eq "\n"){
-				$more = $BOL;
-			}else{
-				$BOL = 0;
-				if(length($letter)){
-					$letters[$i++] = $letter;
-					# mylog @letters;
-				}else{
-					sleep 1;
-				};
-			};
-		} while( $more );
+    DEBUG and mylog "sent $_[0]";
 
-		my $iline = join('',@letters);
+    my ( $dash, $response ) = ( '-', '' );
+    while ( $dash eq '-' ) {
+        my $letter;
+        my @letters;
+        my $i    = 0;
+        my $more = 1;
+        my $BOL  = 1;    # "beginning of line"
+        do {
+            if ($timeout) {
+                mylog "timeout in getresponse";
+                return undef;
+            }
+            if (eofSOCK) {
+                mylog "eofSOCK";
+                return undef;
+            }
+            sysread( SOCK, $letter, 1 );
+            if ( $letter eq "\r" or $letter eq "\n" ) {
+                $more = $BOL;
+            }
+            else {
+                $BOL = 0;
+                if ( length($letter) ) {
+                    $letters[ $i++ ] = $letter;
 
-	#	mylog "received: [$iline]";
-		$response .= $iline;
-		($dash) = $iline =~ /^\d+([\-\ ])/;
-	};
-	$response;
-};
+                    # mylog @letters;
+                }
+                else {
+                    sleep 1;
+                }
+            }
+        } while ($more);
 
-my $onioning=0;
+        my $iline = join( '', @letters );
 
-sub deferralmessage{
-# usage: $message->deferralmessage("reason we are deferring")
+        DEBUG and mylog "received: [$iline]";
+        $response .= $iline;
+        ($dash) = $iline =~ /^\d+([\-\ ])/;
+    }
+    $response;
+}
 
-	$ReturnAddress =~ /\@/ or return; #suppress doublebounces
-	my $filename = join '.',time,'DeferralReport',rand(10000000);
-	open BOUNCE, ">$basedir/temp/$filename";
-	print BOUNCE <<EOF; # we are moving this into immediate
+my $onioning = 0;
+
+sub deferralmessage {
+
+    # usage: $message->deferralmessage("reason we are deferring")
+
+    $ReturnAddress =~ /\@/ or return;    #suppress doublebounces
+    my $filename = join '.', time, 'DeferralReport', rand(10000000);
+    open BOUNCE, ">$basedir/temp/$filename";
+    print BOUNCE <<EOF;                  # we are moving this into immediate
 <>
 $ReturnAddress
 $dateheader
+Message-Id: <$filename\@$MyDomain>
 From: MAILER-DAEMON
 To: $ReturnAddress
 Subject: delivery deferral to <$Recipient>
@@ -637,284 +709,445 @@ The first eighty lines of the message follow below:
 -------------------------------------------------------------
 EOF
 
-	seek(MESSAGE,0,0);
-	for(1..80){
-		defined(my $lin = <MESSAGE>) or last;
-		print BOUNCE $lin;
-	};
-	close BOUNCE;
-	rename "$basedir/temp/$filename","$basedir/immediate/$filename";
+    seek( MESSAGE, 0, 0 );
+    for ( 1 .. 80 ) {
+        defined( my $lin = <MESSAGE> ) or last;
+        print BOUNCE $lin;
+    }
+    close BOUNCE;
+    rename "$basedir/temp/$filename", "$basedir/immediate/$filename";
 }
+
 # end sub deferralmessage
 
-sub attempt{
-	$onioning or $ReuseQuota = $ReuseQuotaInitial;
-	$line='';
-	$ConnectionProblem = 0;
-	# deliver and delete, or requeue; also send bounces if appropriate
-	my $message = shift;
-	mylog "Attempting [$ReturnAddress] -> [$Recipient]";
-	# Message Data is supposed to start on third line
+sub attempt {
+    $onioning or $ReuseQuota = $ReuseQuotaInitial;
+    $line              = '';
+    $ConnectionProblem = 0;
 
-	########################################
-	# reuse sock or define global $Domain
-	########################################
-	if (defined($Domain) and $Domain and $Recipient =~ /\@$Domain$/i){
-		eofSOCK or goto HaveSOCK;
-	};
+    # deliver and delete, or requeue; also send bounces if appropriate
+    my $message = shift;
+    mylog "Attempting [$ReturnAddress] -> [$Recipient]";
 
-	unless(($Domain) = $Recipient =~ /\@([^\s>]+)/){
-		mylog "no domain in recipient [$Recipient], discarding message";
-		unlink $$message;
-		return;
-	};
-	$Domain =~ y/A-Z/a-z/;
-	########################################
-	# $Domain is now defined
-	########################################
+    # Message Data is supposed to start on third line
 
-	if (concachetest $Domain){
-		mylog "$Domain connection failure cached";
-		goto ReQueue_unconnected;
-	};
+########################################
+    # reuse sock or define global $Domain
+########################################
+    if ( defined($Domain) and $Domain and $Recipient =~ /\@$Domain$/i ) {
+        eofSOCK or goto HaveSOCK;
+    }
 
-	my @dnsmxes;
-	@dnsmxes = dnsmx($Domain);
-	my $dnsmx_count = @dnsmxes;
-	mylog "[[$Domain]] MX handled by @dnsmxes";
-	unless ( @dnsmxes ){
-		mylog "requeueing due to empty dnsmx result";
-		goto ReQueue_unconnected;
-	};
-	my $Peerout;
+    unless ( ($Domain) = $Recipient =~ /\@([^\s>]+)/ ) {
+        mylog "no domain in recipient [$Recipient], discarding message";
+        unlink $$message;
+        return;
+    }
+    $Domain =~ y/A-Z/a-z/;
+########################################
+    # $Domain is now defined
+########################################
 
+    if ( concachetest $Domain) {
+        mylog "$Domain connection failure cached";
+        goto ReQueue_unconnected;
+    }
 
-	cache4test $Recipient and
-		goto ReQueue;
-	cache5test $Recipient and
-		goto Bounce;
+    my @dnsmxes;
+    @dnsmxes = dnsmx($Domain);
+    my $dnsmx_count = @dnsmxes;
+    mylog "[[$Domain]] MX handled by @dnsmxes";
+    unless (@dnsmxes) {
+        mylog "requeueing due to empty dnsmx result";
+        goto ReQueue_unconnected;
+    }
+    my $Peerout;
 
-	TryAgain:
+    cache4test $Recipient
+      and goto ReQueue;
+    cache5test $Recipient
+      and goto Bounce;
 
-	while($Peerout = shift @dnsmxes){
-		# mylog "attempting $Peerout";
+  TryAgain:
 
-		# connect to $Peerout, smtp
-		my @GHBNres;
-		unless ( @GHBNres = gethostbyname($Peerout)){
-			if ($dnsmx_count == 1 and
-			    $Peerout eq $Domain){
-				mylog $line="Apparently there is no valid MX for $Domain";
-				$ConnectionProblem = 0;
-				goto Bounce;
-			};
-			next;
-		};
-		my $iaddr = $GHBNres[4]	or next;
-        	my $paddr   = sockaddr_in(25, $iaddr);
-        	socket(SOCK,
-			PF_INET,
-			SOCK_STREAM,
-			getprotobyname('tcp'))
-			or die "$$ socket: $!";
+    while ( $Peerout = shift @dnsmxes ) {
 
-		connect(SOCK, $paddr)  || next ;
-		mylog "connected to $Peerout";
-         	my $oldfh = select(SOCK); $| = 1; select($oldfh);
-		goto SMTPsession;
+        # mylog "attempting $Peerout";
 
-	};
+        # connect to $Peerout, smtp
+        my @GHBNres;
+        unless ( @GHBNres = gethostbyname($Peerout) ) {
+            if (    $dnsmx_count == 1
+                and $Peerout eq $Domain )
+            {
+                mylog $line= "Apparently there is no valid MX for $Domain";
+                $ConnectionProblem = 0;
+                goto Bounce;
+            }
+            next;
+        }
+        my $iaddr = $GHBNres[4] or next;
+        my $paddr = sockaddr_in( 25, $iaddr );
+        socket( SOCK, PF_INET, SOCK_STREAM, getprotobyname('tcp') )
+          or die "$$ socket: $!";
 
-	concache $Domain;
-	mylog "Unable to establish SMTP connection to $Domain MX";
-	$ConnectionProblem = 1;
-	goto ReQueue_unconnected;
+        connect( SOCK, $paddr ) || next;
+        mylog "connected to $Peerout";
+        my $oldfh = select(SOCK);
+        $| = 1;
+        select($oldfh);
+        goto SMTPsession;
 
+    }
 
-	# talk SMTP
-	SMTPsession:	
-	$SIG{ALRM} =
-	sub { mylog 'TIMEOUT -- caught alarm signal in attempt()'; 
-			$message->requeue( "timed out during SMTP interaction" );
-			unlink $$message;	# "true"
-			$onioning and unlink 
-				"$basedir/domain/$Domain.$$";
-			exit;
-	};
+    concache $Domain;
+    mylog "Unable to establish SMTP connection to $Domain MX";
+    $ConnectionProblem = 1;
+    goto ReQueue_unconnected;
 
+    # talk SMTP
+  SMTPsession:
+    $SIG{ALRM} = sub {
+        mylog 'TIMEOUT -- caught alarm signal in attempt()';
+        $message->requeue("timed out during SMTP interaction");
+        unlink $$message;    # "true"
+        $onioning and unlink "$basedir/domain/$Domain.$$";
+        exit;
+    };
 
-        # expect 220
-        alarm 60;
-	my $Greetingcounter = 0;
-	ExpectGreeting:
+    # expect 220
+    alarm 60;
+    my $Greetingcounter = 0;
+  ExpectGreeting:
 
-	my @GreetArr = ();
-	do {
-	        eval { defined($line = <SOCK>) or die "no line from socket. [$!]"; };
-	        if($@ or ++$Greetingcounter > 20 ){
-	           mylog @GreetArr,"Error: $@";
-	           close SOCK;
-	           goto TryAgain;
-	        };
+    my @GreetArr = ();
+    do {
+        eval { defined( $line = <SOCK> ) or die "no line from socket. [$!]"; };
+        if ( $@ or ++$Greetingcounter > 20 ) {
+            mylog @GreetArr, "Error: $@";
+            close SOCK;
+            goto TryAgain;
+        }
         chomp $line;
         mylog $line;
         push @GreetArr, $line;
-       } while (substr($line,0,4) ne '220 ') ; # this condition will enforce greeting compliance
-	
-	$line = join ' / ',@GreetArr;
-	$line =~ s/[\r\n]//g;
-	@GreetArr > 1 and  mylog "extended greeting: $line";
+      } while ( substr( $line, 0, 4 ) ne '220 ' )
+      ;    # this condition will enforce greeting compliance
 
-        # print SOCK "HELO $MyDomain",CRLF;
-        # expect 250
+    $line = join ' / ', @GreetArr;
+    $line =~ s/[\r\n]//g;
+    @GreetArr > 1 and mylog "extended greeting: $line";
+
+    # print SOCK "HELO $MyDomain",CRLF;
+    # expect 250
+    # $line = getresponse "HELO $MyDomain" or goto TryAgain;
+    $line = getresponse "EHLO $MyDomain" or goto TryAgain;
+    unless ( $line =~ /^250[ \-]/ ) {
+        mylog "peer not happy with EHLO: [$line]";
         $line = getresponse "HELO $MyDomain" or goto TryAgain;
-	mylog $line;
-        unless($line =~ /^250[ \-]/){
-		mylog "peer not happy with HELO: [$line]";
-		close SOCK;
-		goto TryAgain;
-	};
+        unless ( $line =~ /^250[ \-]/ ) {
+            mylog "peer not happy with HELO: [$line]";
+            close SOCK;
+            goto TryAgain;
+        }
+    }
+    mylog $line;
 
-	HaveSOCK:
-	$line = getresponse "RSET" or goto TryAgain;
-       
-        # expect 250
-        # $line = getresponse;
-	# mylog "RSET and got [$line]";
-        unless($line =~ /^250[ \-]/){
-		mylog "peer not happy with RSET: [$line] will not reuse this connection";
-		$ReuseQuota =  0;
-		# close SOCK;
-		# goto TryAgain;
-	};
+  HaveSOCK:
+    $line = getresponse "RSET" or goto TryAgain;
 
+    # expect 250
+    # $line = getresponse;
+    # mylog "RSET and got [$line]";
+    unless ( $line =~ /^250[ \-]/ ) {
+        mylog
+          "peer not happy with RSET: [$line] will not reuse this connection";
+        $ReuseQuota = 0;
 
-	# remove angle brackets if any
-	$ReturnAddress =~ s/^.*<//;
-	$ReturnAddress =~ s/>.*$//;
+        # close SOCK;
+        # goto TryAgain;
+    }
 
-        $line = getresponse "MAIL FROM: <$ReturnAddress>"  or goto TryAgain;
-        mylog "$line";
-        unless($line =~ /^[2]/){
-		mylog "peer not happy with return address: [$line]";
-		if ($line =~ /^[4]/){
-			mylog "requeueing";
-			goto ReQueue;
-		};
-		if ($line =~ /^[5]/){
-			goto Bounce;
-		};
-		mylog "and response was neither 2,4 or 5 coded.";
-		goto TryAgain;
-	};
+    # remove angle brackets if any
+    $ReturnAddress =~ s/^.*<//;
+    $ReturnAddress =~ s/>.*$//;
 
-        # print SOCK "RCPT TO: <$Recipient>\r\n";
-        # expect 250
-	
-	# remove angle brackets if any
-	$Recipient =~ s/^.*<//;
-	$Recipient =~ s/>.*$//;
+    $line = getresponse "MAIL FROM: <$ReturnAddress>" or goto TryAgain;
+    mylog "$line";
+    unless ( $line =~ /^[2]/ ) {
+        mylog "peer not happy with return address: [$line]";
+        if ( $line =~ /^[4]/ ) {
+            mylog "requeueing";
+            goto ReQueue;
+        }
+        if ( $line =~ /^[5]/ ) {
+            goto Bounce;
+        }
+        mylog "and response was neither 2,4 or 5 coded.";
+        goto TryAgain;
+    }
 
-        $line = getresponse "RCPT TO: <$Recipient>" or goto TryAgain;
-        unless($line =~ /^2/){
-		mylog "peer not happy with recipient: [$line]";
-		if ($line =~ /^4/){
-			cache4 $Recipient;
-			mylog "requeueing";
-			goto ReQueue;
-		};
-		if ($line =~ /^5/){
-			cache5 $Recipient;
-			goto Bounce;
-		};
-		mylog "reporting noncompliant SMTP peer [$Peerout]";
-		goto TryAgain;
-	};
+    # print SOCK "RCPT TO: <$Recipient>\r\n";
+    # expect 250
+    my @recips4;
+    my @recips5;
 
+    @Recipients > 1 and do {
+        for ( my $i = 0 ; $i < @Recipients ; $i++ ) {
+            my $r = int rand @Recipients;
+            @Recipients[ $i, $r ] = @Recipients[ $r, $i ];
+        }
+    };
 
-        # print SOCK "DATA\r\n";
-        # expect 354
-        $line = getresponse 'DATA' or goto TryAgain;
-        unless($line =~ /^354 /){
-		mylog "peer not happy with DATA: [$line]";
-		if ($line =~ /^4/){
-			mylog "requeueing";
-			goto ReQueue;
-		};
-		if ($line =~ /^5/){
-			goto Bounce;
-		};
-		mylog "reporting noncompliant SMTP peer [$Peerout]";
-		goto TryAgain;
-	};
-	my $linecount;
-	my $bytecount;
-	while (<MESSAGE>){
-		$linecount++;
-		$bytecount += length;
-		chomp;
-		eval{
-        	alarm 60;
-		if ($_ eq '.'){
-			print SOCK "..\r\n" or die $!;
-		}else{
-			print SOCK $_,"\r\n" or die $!;
-		};
-		};
-		if ($@){
-			mylog $@;
-			goto TryAgain;
-		};
-	};
-	# print SOCK ".\r\n";
-        # expect 250
-	mylog "$linecount lines ($bytecount chars) of message data, sending dot";	 # TryAgain will pop the MX list when there are more than 1 MX
-        $line = getresponse '.' or goto TryAgain;
-        unless($line =~ /^2/){
-		mylog "peer not happy with message body: [$line]";
-		if ($line =~ /^4/){
-			mylog "requeueing";
-			goto ReQueue;
-		};
-		if ($line =~ /^5/){
-			goto Bounce;
-		};
-		mylog "reporting noncompliant SMTP peer [$Peerout]";
-		goto TryAgain;
-	};
+    my @GoodR;
+    my @emsgmap;
+    foreach (@Recipients) {
 
-	goto GoodDelivery;
+        # remove angle brackets if any
+        s/^.*<//;
+        s/>.*$//;
 
-	ReQueue:
-	$message->requeue($line);
-	goto GoodDelivery;
+        $line = getresponse "RCPT TO: <$_>" or goto TryAgain;
+        if ( $line =~ /^2/ ) {
+            push @GoodR, $_;
+        }
+        else {
+            mylog "peer not happy with recipient $_: [$line]";
+            if ( $line =~ /^4/ ) {
+                if ( @Recipients > 1 ) {
+                    push @recips4, $_;
 
-	ReQueue_unconnected:
-	$message->requeue($line);
-	return undef;
+                    # no emsgmap4 is needed because 4-deferred recipients
+                    # get split apart, eventually there will be only one
+                    # in the message and then 4-bounces will happen
+                }
+                else {
+                    cache4 $Recipient;
+                    mylog "requeueing";
+                    goto ReQueue;
+                }
+            }
+            elsif ( $line =~ /^5/ ) {
+                if ( @Recipients > 1 ) {
+                    if (/\@$Domain$/) {
+                        push @recips5, $_;
+                        push @emsgmap, " $_: $line";
+                    }
+                    else {
+                        push @recips4, $_;
+                    }
+                }
+                else {
+                    cache5 $Recipient;
+                    goto Bounce;
+                }
+            }
+            else {
+                mylog
+                  "noncompliant SMTP peer [$Peerout] gave funny response $line";
+                goto TryAgain;
+            }
+        }
+    }
 
-	Bounce:
+  ReQueueFours:
+    if ( @recips4 + @recips5 ) {
+        DEBUG and warn "4: @recips4";
+        DEBUG and warn "5: @recips5";
+        if ( @recips5 == @Recipients ) {
+            goto Bounce;
+        }
 
-	$ReturnAddress =~ /\@/ or goto GoodDelivery; #suppress doublebounces
+        #	if ((@recips5 + @recips4) == @Recipients){
+        #		goto ReQueue;
+        #  	};
+
+        my $counter = $ReQ::counter++;
+        open BODY, ">$basedir/temp/BODY.$$.$counter";
+        eval "END{ unlink '$basedir/temp/BODY.$$.$counter'  }";
+        while (<MESSAGE>) {
+            print BODY $_;
+        }
+        close BODY;
+        open MESSAGE, "<$basedir/temp/BODY.$$.$counter";
+
+        if (@recips4) {
+            DEBUG and warn "requeing for @recips4";
+            open ONE, ">$basedir/temp/RETRY.$$.$counter.ONE";
+            print ONE "$ReturnAddress\n";
+            @recips4 > 1 and do {
+                open TWO, ">$basedir/temp/RETRY.$$.$counter.TWO";
+                print TWO "$ReturnAddress\n";
+                while (@recips4) {
+                    print ONE ( ( shift @recips4 ) . "\n" );
+                    @recips4 and print TWO ( ( shift @recips4 ) . "\n" );
+                }
+                print ONE "\n";
+                print TWO "\n";
+                while (<MESSAGE>) {
+                    print ONE $_;
+                    print TWO $_;
+
+                }
+                close ONE;
+                close TWO;
+                rename "$basedir/temp/RETRY.$$.$counter.ONE",
+                  "$basedir/RETRY4a" . rand(98765);
+                rename "$basedir/temp/RETRY.$$.$counter.TWO",
+                  "$basedir/RETRY4b" . rand(98765);
+
+            };
+            open MESSAGE, "<$basedir/temp/BODY.$$.$counter";
+          RECIP5:
+            while (@recips5) {
+                $ReturnAddress =~ /\@/ or last;    #suppress doublebounces
+
        # grep {$ReturnAddress =~ m/$_/} @NoBounceRegexList and goto GoodDelivery
-       for (@NoBounceRegexList){
-               if($ReturnAddress =~ m/$_/){
-                       mylog "suppressing bounce to <$ReturnAddress>";
-                       goto GoodDelivery;
-               };
-       };
-       mylog "bouncing to <$ReturnAddress>";
-	my $filename = join '.',time(),'bounce',rand(10000000);
-	open BOUNCE, ">$basedir/temp/$filename";
-	defined($line) or $line='unknown reason';
-	defined($Recipient) or $Recipient='unknown recipient';
-	defined($ReturnAddress) or $ReturnAddress='<>';
-	defined($Peerout) or $Peerout='unknown peer';
-
-	print BOUNCE <<EOF;
+                for (@NoBounceRegexList) {
+                    if ( $ReturnAddress =~ m/$_/ ) {
+                        mylog "suppressing bounce to <$ReturnAddress>";
+                        last RECIP5;
+                    }
+                }
+                mylog "bouncing to <$ReturnAddress>";
+                my $filename = join '.', time(), 'HardFail', rand(10000000);
+                open BOUNCE, ">$basedir/temp/$filename";
+                local $" = "\n";
+                print BOUNCE <<EOF;
 <>
 $ReturnAddress
 $dateheader
+Message-Id: <$filename\@$MyDomain>
+From: MAILER-DAEMON
+To: $ReturnAddress
+Subject: multiple SMTP rejections for <@recips5>
+Content-type: text/plain
+
+While connected to SMTP peer $Peerout,
+the $MyDomain e-mail system received the error messages
+
+@emsgmap
+
+which indicates a permanent error.
+The first hundred and fifty lines of the message follow below:
+-------------------------------------------------------------
+EOF
+
+                for ( 1 .. 150 ) {
+                    defined( my $lin = <MESSAGE> ) or last;
+                    print BOUNCE $lin;
+                }
+                close BOUNCE;
+                rename "$basedir/temp/$filename",
+                  "$basedir/immediate/$filename";
+            }
+            @recips5 = ();
+        }
+        open MESSAGE, "<$basedir/temp/BODY.$$.$counter";
+    }
+
+    $Post::Data::Trouble and goto GoodDelivery;
+
+    # DATA_TRANSACTION:
+    $Recipient = "@GoodR";
+
+    # print SOCK "DATA\r\n";
+    # expect 354
+    $line = getresponse 'DATA' or goto TryAgain;
+    unless ( $line =~ /^354 / ) {
+        mylog "peer not happy with DATA: [$line]";
+        if ( @GoodR == 1 ) {
+            if ( $line =~ /^4/ ) {
+                goto ReQueue;
+            }
+            if ( $line =~ /^5/ ) {
+                goto Bounce;
+            }
+            mylog "reporting noncompliant SMTP peer [$Peerout]";
+            goto TryAgain;
+        }
+        @recips4             = @GoodR;
+        $Post::Data::Trouble = 1;
+        goto ReQueueFours;
+
+    }
+    my $linecount;
+    my $bytecount;
+    while (<MESSAGE>) {
+        $linecount++;
+        $bytecount += length;
+        chomp;
+        eval {
+            alarm 60;
+            if ( $_ eq '.' ) {
+                print SOCK "..\r\n" or die $!;
+            }
+            else {
+                print SOCK $_, "\r\n" or die $!;
+            }
+        };
+        if ($@) {
+            mylog $@;
+            goto TryAgain;
+        }
+    }
+
+    # print SOCK ".\r\n";
+    # expect 250
+    mylog "$linecount lines ($bytecount chars) of message data, sending dot"
+      ;    # TryAgain will pop the MX list when there are more than 1 MX
+    $line = getresponse '.' or goto TryAgain;
+    unless ( $line =~ /^2/ ) {
+        mylog "peer not happy with message body: [$line]";
+        if ( $line =~ /^4/ ) {
+            @recips4             = @GoodR;
+            $Post::Data::Trouble = 1;
+            goto ReQueueFours;
+            mylog "requeueing";
+            goto ReQueue;
+        }
+        if ( $line =~ /^5/ ) {
+            goto Bounce;
+        }
+        mylog "reporting noncompliant SMTP peer [$Peerout]";
+        goto TryAgain;
+    }
+
+    goto GoodDelivery;
+
+  ReQueue:
+    $message->requeue($line);
+    goto GoodDelivery;
+
+  ReQueue_unconnected:
+    $message->requeue($line);
+    return undef;
+
+  Bounce:
+
+    $ReturnAddress =~ /\@/ or goto GoodDelivery;    #suppress doublebounces
+
+    # grep {$ReturnAddress =~ m/$_/} @NoBounceRegexList and goto GoodDelivery
+    for (@NoBounceRegexList) {
+        if ( $ReturnAddress =~ m/$_/ ) {
+            mylog "suppressing bounce to <$ReturnAddress>";
+
+            goto GoodDelivery;
+        }
+    }
+    mylog "bouncing to <$ReturnAddress>";
+    my $filename = join '.', time(), 'HardFail', rand(10000000);
+    open BOUNCE, ">$basedir/temp/$filename";
+    defined($line)          or $line          = 'unknown reason';
+    defined($Recipient)     or $Recipient     = 'unknown recipient';
+    defined($ReturnAddress) or $ReturnAddress = '<>';
+    defined($Peerout)       or $Peerout       = 'unknown peer';
+
+    print BOUNCE <<EOF;
+<>
+$ReturnAddress
+$dateheader
+Message-Id: <$filename\@$MyDomain>
 From: MAILER-DAEMON
 To: $ReturnAddress
 Subject: delivery failure to <$Recipient>
@@ -930,86 +1163,90 @@ The first hundred and fifty lines of the message follow below:
 -------------------------------------------------------------
 EOF
 
-	seek(MESSAGE,0,0);
-	for(1..150){
-		defined(my $lin = <MESSAGE>) or last;
-		print BOUNCE $lin;
-	};
-	close BOUNCE;
-	rename "$basedir/temp/$filename","$basedir/immediate/$filename";
+    seek( MESSAGE, 0, 0 );
+    for ( 1 .. 150 ) {
+        defined( my $lin = <MESSAGE> ) or last;
+        print BOUNCE $lin;
+    }
+    close BOUNCE;
+    rename "$basedir/temp/$filename", "$basedir/immediate/$filename";
 
-	GoodDelivery:
-	undef $Recipient;
-	unlink $$message;	# "true"
+  GoodDelivery:
+    undef $Recipient;
+    unlink $$message;    # "true"
 
-	alarm 0;
-	if($onioning){
-	        mylog "already onioning";
-	        return;
-	};
-	if( -f "$basedir/domain/$Domain"){
-		mylog "onioning $Domain";
-		open DOMAINLOCK, ">>$basedir/domain/.lock";
-		flock DOMAINLOCK, LOCK_EX;
-		rename "$basedir/domain/$Domain","$basedir/domain/$Domain.$$";
-		flock DOMAINLOCK, LOCK_UN;
-		close DOMAINLOCK;
-		# sleep 4;	# let any writers finish writing
-		local *DOMAINLIST;
-		$onioning++;
-		open DOMAINLIST, "<$basedir/domain/$Domain.$$";
-		while (<DOMAINLIST>){
-			chomp;
-			-f $_ or next;
-			if( --$ReuseQuota < 0 or eofSOCK ){	# no more socket reuse.
-				open MOREDOMAIN, ">>$basedir/domain/$Domain";
-				flock MOREDOMAIN, LOCK_EX;
-				seek MOREDOMAIN,2,0;
-					while (<DOMAINLIST>){
-						chomp;
-						-f $_ or next;
-						print MOREDOMAIN "$_\n";
-					};
-				flock MOREDOMAIN, LOCK_UN;
-				close MOREDOMAIN;
-				last;
-			};
-			mylog "reusing sock with $_";
-			my $M = newmessage $_; # sets some globals
-			$M or next;
-			$M->attempt();
-			undef $Recipient;
-		};
-		unlink "$basedir/domain/$Domain.$$";
-		$onioning--;
-	}else{
-	        mylog "no onion file for $Domain";
-	};
-	
+    alarm 0;
+    if ($onioning) {
+        mylog "already onioning";
+        return;
+    }
+    if ( -f "$basedir/domain/$Domain" ) {
+        mylog "onioning $Domain";
+        open DOMAINLOCK, ">>$basedir/domain/.lock";
+        flock DOMAINLOCK, LOCK_EX;
+        rename "$basedir/domain/$Domain", "$basedir/domain/$Domain.$$";
+        flock DOMAINLOCK, LOCK_UN;
+        close DOMAINLOCK;
 
-	eofSOCK or mylog getresponse 'QUIT';
-	close SOCK;
+        # sleep 4;	# let any writers finish writing
+        local *DOMAINLIST;
+        $onioning++;
+        open DOMAINLIST, "<$basedir/domain/$Domain.$$";
+        while (<DOMAINLIST>) {
+            chomp;
+            -f $_ or next;
+            if ( --$ReuseQuota < 0 or eofSOCK ) {    # no more socket reuse.
+                open MOREDOMAIN, ">>$basedir/domain/$Domain";
+                flock MOREDOMAIN, LOCK_EX;
+                seek MOREDOMAIN, 2, 0;
+                while (<DOMAINLIST>) {
+                    chomp;
+                    -f $_ or next;
+                    print MOREDOMAIN "$_\n";
+                }
+                flock MOREDOMAIN, LOCK_UN;
+                close MOREDOMAIN;
+                last;
+            }
+            mylog "reusing sock with $_";
+            my $M = newmessage $_;    # sets some globals
+            $M or next;
+            $M->attempt();
+            undef $Recipient;
+        }
+        unlink "$basedir/domain/$Domain.$$";
+        $onioning--;
+    }
+    else {
+        mylog "no onion file for $Domain";
+    }
 
-	return;
+    eofSOCK or mylog getresponse 'QUIT';
+    close SOCK;
 
-};
+    return;
 
-sub requeue{
-	my $message = shift;
-	my $reason = shift;
-	my ($fdir,$fname) = $$message =~ m#^(.+)/([^/]+)$#;
-	my @stat = stat($$message);
-	my $age = time() - $stat[9];
+}
 
-	if ($age > OneWeek){
+sub requeue {
+    my $message = shift;
+    my $reason  = shift;
+    my ( $fdir, $fname ) = $$message =~ m#^(.+)/([^/]+)$#;
+    my @stat = stat($$message);
+    my $age  = $time - $stat[9];
+    mylog "reQing $$message which is $age seconds old";
+    DEBUG and warn "reQing $$message which is $age seconds old";
 
-		$ReturnAddress =~ /\@/ or goto unlinkme; #suppress doublebounces
-		my $filename = join '.',time,$$,'bounce',rand(10000000);
-		open BOUNCE, ">$basedir/temp/$filename";
-		print BOUNCE <<EOF;
+    if ( $age > OneWeek ) {
+        mylog "bouncing message $age seconds old";
+        $ReturnAddress =~ /\@/ or goto unlinkme;    #suppress doublebounces
+        my $filename = join '.', time, $$, 'FinalFail', rand(10000000);
+        open BOUNCE, ">$basedir/temp/$filename";
+        print BOUNCE <<EOF;
 <>
 $ReturnAddress
 $dateheader
+Message-Id: <$filename\@$MyDomain>
 From: MAILER-DAEMON
 To: $ReturnAddress
 Subject: delivery failure to <$Recipient>
@@ -1025,32 +1262,35 @@ The first hundred and fifty lines of the message follow below:
 -------------------------------------------------------------
 EOF
 
-		seek(MESSAGE,0,0);
-		for(1..150){
-			defined(my $lin = <MESSAGE>) or last;
-			print BOUNCE $lin;
-		};
-		close BOUNCE;
-		rename "$basedir/temp/$filename","$basedir/immediate/$filename";
+        seek( MESSAGE, 0, 0 );
+        for ( 1 .. 150 ) {
+            defined( my $lin = <MESSAGE> ) or last;
+            print BOUNCE $lin;
+        }
+        close BOUNCE;
+        rename "$basedir/temp/$filename", "$basedir/immediate/$filename";
 
-		unlinkme:
-		unlink $$message;
+      unlinkme:
+        unlink $$message;
 
-		# clean up per-domain queue
-		DLpurge;
-	};
+        # clean up per-domain queue
+        DLpurge;
+        return;
+    }
 
-	if (
-		$age > $AgeBeforeDeferralReport and
-		$reason and
-		$ReturnAddress =~ /\@/ # suppress doublebounces
-	){
-	my $filename = join '.',time,$$,'bounce',rand(10000000);
-	open BOUNCE, ">$basedir/temp/$filename";
-	print BOUNCE <<EOF;
+    if (
+            $age > $AgeBeforeDeferralReport
+        and $reason
+        and $ReturnAddress =~ /\@/    # suppress doublebounces
+      )
+    {
+        my $filename = join '.', time, $$, 'ReQueue', rand(10000000);
+        open BOUNCE, ">$basedir/temp/$filename";
+        print BOUNCE <<EOF;
 <>
 $ReturnAddress
 $dateheader
+Message-Id: <$filename\@$MyDomain>
 From: MAILER-DAEMON
 To: $ReturnAddress
 Subject: delivery deferral to <$Recipient>
@@ -1067,77 +1307,69 @@ The first hundred and fifty lines of the message follow below:
 -------------------------------------------------------------
 EOF
 
-	seek(MESSAGE,0,0);
-	for(1..150){
-		defined(my $lin = <MESSAGE>) or last;
-		print BOUNCE $lin;
-	};
-	close BOUNCE;
-	rename "$basedir/temp/$filename","$basedir/immediate/$filename";
+        seek( MESSAGE, 0, 0 );
+        for ( 1 .. 150 ) {
+            defined( my $lin = <MESSAGE> ) or last;
+            print BOUNCE $lin;
+        }
+        close BOUNCE;
+        rename "$basedir/temp/$filename", "$basedir/immediate/$filename";
 
-	}; # if old enough to report as deferred 
+    }
+    ;    # if old enough to report as deferred
 
-	my $futuretime = int(time + 100 + ( $age * ( 3 + rand(2)) / 4));
-	# print "futuretime will be $futuretime\n";
-	my ($dir,$subdir) = ($futuretime =~ m/^(\d+)(\d\d)\d\d$/);
-	# print "dir,subdir is $dir,$subdir\n";
-	
-	-d "$basedir/queue/$dir"
-	or mkdir "$basedir/queue/$dir", 0777
-	or croak "$$ Permissions problems: $basedir/queue/$dir [$!]\n";
+    my $futuretime = int( time + 100 + ( $age * ( 3 + rand(2) ) / 4 ) );
 
-	-d "$basedir/queue/$dir/$subdir"
-	or mkdir "$basedir/queue/$dir/$subdir", 0777
-	or croak "$$ Permissions problems: $basedir/queue/$dir/$subdir [$!]\n";
+    # print "futuretime will be $futuretime\n";
+    my @DirPieces = split / /, strftime "%Y %m %d %H %M %S",
+      localtime $futuretime;
 
+    # print "dir,subdir is $dir,$subdir\n";
+    my $dir = "$basedir/queue";
+    while (@DirPieces) {
+        $dir .= ( '/' . shift @DirPieces );
+        -d $dir
+          or mkdir $dir, 0777
+          or croak "$$ Permissions problems: mkdir $dir: [$!]\n";
+    }
 
-	rename $$message, "$basedir/queue/$dir/$subdir/$fname";
-	mylog "message queued to $basedir/queue/$dir/$subdir/$fname";
+    rename $$message, "$dir/$fname";
+    mylog "message queued to $dir/$fname";
 
-	$ConnectionProblem and DLsave("$basedir/queue/$dir/$subdir/$fname"); ;
-};
+    $ConnectionProblem and DLsave("$dir/$fname");
+}
 
-sub DLpurge(){
-	-f "$basedir/domain/$Domain" or return;
-	my @list;
-	open DOMAINLISTLOCK, ">>$basedir/domain/.lock"
-	   or return mylog "could not open [$basedir/domain/.lock] for append";
-	alarm 0;	# we're going to block for the lock
-	flock DOMAINLISTLOCK, LOCK_EX;
-	open DOMAINLIST, "<$basedir/domain/$Domain";
-	chomp(@list = <DOMAINLIST>);
-	@list = grep { -f $_ } @list;
-	
-	if (@list){
-	 open DOMAINLIST, ">$basedir/domain/$Domain"
-	   or return mylog "could not open [$basedir/domain/$Domain] for clobber";
-	 foreach (@list){
-		print DOMAINLIST "$_\n";
-	 };
-	 close DOMAINLIST;
-	}else{
-	 unlink "$basedir/domain/$Domain";
+sub DLpurge() {
 
-	};
-	 flock DOMAINLISTLOCK, LOCK_UN;
-	 close DOMAINLISTLOCK;
+    # -f "$basedir/domain/$Domain" or return;
+    # rename fails when source file ain't there
+    rename "$basedir/domain/$Domain", "$basedir/domain/$Domain$$" or return;
+    my $fn;
+    open DOMAINLIST, "<$basedir/domain/$Domain$$";
 
-};
+    while ( $fn = <DOMAINLIST> ) {
+        chomp $fn;
+        my ($namepart) = ( $fn =~ m{([^/]+)$} );
+        rename $fn, "$basedir/immediate/DRUSH$$.$namepart";
+    }
 
-sub DLsave($){
-	open DOMAINLISTLOCK, ">>$basedir/domain/.lock"
-	   or return mylog "could not open [$basedir/domain/.lock] for append";
-	alarm 0;	# we're going to block for the lock
-	flock DOMAINLISTLOCK, LOCK_EX;
-	open DOMAINLIST, ">>$basedir/domain/$Domain"
-	   or return mylog "could not open [$basedir/domain/$Domain] for append";
-	print DOMAINLIST "$_[0]\n";
-	close DOMAINLIST;
-	flock DOMAINLISTLOCK, LOCK_UN;
-	close DOMAINLISTLOCK;
+    close DOMAINLIST;
+    unlink "$basedir/domain/$Domain$$";
+}
 
-};
+sub DLsave($) {
+    open DOMAINLISTLOCK, ">>$basedir/domain/.lock"
+      or return mylog "could not open [$basedir/domain/.lock] for append";
+    alarm 0;    # we're going to block for the lock
+    flock DOMAINLISTLOCK, LOCK_EX;
+    open DOMAINLIST, ">>$basedir/domain/$Domain"
+      or return mylog "could not open [$basedir/domain/$Domain] for append";
+    print DOMAINLIST "$_[0]\n";
+    close DOMAINLIST;
+    flock DOMAINLISTLOCK, LOCK_UN;
+    close DOMAINLISTLOCK;
 
+}
 
 1;
 __END__
@@ -1148,33 +1380,33 @@ TipJar::MTA - outgoing SMTP with exponential random backoff.
 
 =head1 SYNOPSIS
 
-  use TipJar::MTA '/var/spool/MTA';	# must be a writable -d
-					# defaults to ./MTAdir
-  $TipJar::MTA::interval='100';		# the default is 17
-  $TipJar::MTA::TimeStampFrequency='35';	# the default is 200
-  $TipJar::MTA::AgeBeforeDeferralReport=7000;	# default is 4 hours
-  $TipJar::MTA::MyDomain='peanut.af.mil';	# defaults to `hostname`
-                # bouces to certain matching addresses can be suppressed.
-  @TipJar::MTA::NoBounceRegexList = map { qr/$_/} (
-         '^MDA-bounce-recipient\@tipjar.com$',
-         '^RAPNAP\+challenge\+sent\+to\+.+==.+\@pay2send.com$'
-    );
-					# And away we go,
-  TipJar::MTA::run();			# logging to /var/spool/MTA/log/current
+use TipJar::MTA '/var/spool/MTA';	# must be a writable -d
+# defaults to ./MTAdir
+$TipJar::MTA::interval='100';		# the default is 17
+$TipJar::MTA::TimeStampFrequency='35';	# the default is 200
+$TipJar::MTA::AgeBeforeDeferralReport=7000;	# default is 4 hours
+$TipJar::MTA::MyDomain='peanut.af.mil';	# defaults to `hostname`
+# bouces to certain matching addresses can be suppressed.
+@TipJar::MTA::NoBounceRegexList = map { qr/$_/} (
+'^MDA-bounce-recipient\@tipjar.com$',
+'^RAPNAP\+challenge\+sent\+to\+.+==.+\@pay2send.com$'
+);
+# And away we go,
+TipJar::MTA::run();			# logging to /var/spool/MTA/log/current
 
 alternately,
 
-  use TipJar::MTA '/var/spool/MTA', 'nodns';  # we are sending to
-                                              # a restricted set of domains
-                                              # or using a smarthost
-  %TipJar::MTA::SMTProutes = (
-      SMARTHOST => 'smtp_outbound.internal',  # smarthost for forwarding, can be a list too
-      'example.com' => # mail to example.com will be randomly routed through these three
-          [qw/  smtp1.example.com smtp2.example.com backup-smtp.example.org /],
-      'example.net' => 'bad-dog.example.net'  # all mail to example.net goes to bad-dog
-  );
+use TipJar::MTA '/var/spool/MTA', 'nodns';  # we are sending to
+# a restricted set of domains
+# or using a smarthost
+%TipJar::MTA::SMTProutes = (
+SMARTHOST => 'smtp_outbound.internal',  # smarthost for forwarding, can be a list too
+'example.com' => # mail to example.com will be randomly routed through these three
+[qw/  smtp1.example.com smtp2.example.com backup-smtp.example.org /],
+'example.net' => 'bad-dog.example.net'  # all mail to example.net goes to bad-dog
+);
 
-  
+
 
 =head1 DESCRIPTION
 
@@ -1208,6 +1440,8 @@ then a blank line (rather, a line with no @ sign), then the body of the message.
 The L<TipJar::MTA::queue>
 module will help compose such files if needed.
 
+As of version 0.30, multiple recipients on the first line of a queued file will all be attempted, to the mx of the domain of the host in the first recipient.
+
 Messages are rewritten into multiple messages when they are for
 multiple recipients, and then attempted in the order that the
 recipients appeared in the file.
@@ -1233,6 +1467,8 @@ An array of regular expressions can be specified, and if any of
 them match the sender of a bouncing message, the bouncing is
 suppressed, so you don't have to waste time with bounce messages from
 bad addresses you're sending challenges to for instance.
+
+=head3 format for new messages
 
 The format for new messages is as follows:
 
@@ -1424,6 +1660,16 @@ to provide hard-coding of mail exchange paths instead.  And revised the licence.
 moving newly appeared files from basedir into tempdir with unique names, instead
 of locking them, for all those situations where reading a file that was unlinked
 after it was opened just doesn't work.
+
+=item 0.30 31 Oct 2008
+
+the call to C<sleep($interval)> is now checked and retried  when it
+wakes up early due to the CHLD handler.  Also there is new code to handle
+multiple recipients per SMTP transaction, which are organized by preferred
+MX and split into smaller groups when they are delayed at RCPT TO time.
+Yes this made things more complex, and it is not clear that it is bugless,
+so expect a 0.31 fairly soon.
+
 
 =back
 
