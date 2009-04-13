@@ -20,7 +20,7 @@ week.
 
 New with version 0.30, multiple recipients are multiplexed into
 queued message objects rather than doing qmail-style one-recipient-only
-sending.
+sending. (and with version 0.31, this works right.)
 
 use TipJar::MTA::queue to add messages for sending, or simply
 link your properly formatted message into the working directory,
@@ -49,7 +49,7 @@ Net::DNS. (now optional!)
 
 COPYRIGHT AND LICENCE
 
-Copyright (C) 2003,2004,2005,2007 David Nicol / TipJar LLC.
+Copyright (C) 2003,2004,2005,2007,2008,2009 David Nicol / TipJar LLC.
 
 You may use this software as downloaded, free of charge,
 without any warranty whatsoever.  If you find it necessary

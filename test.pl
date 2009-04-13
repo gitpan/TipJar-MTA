@@ -24,9 +24,9 @@ my $HN = hostname();
 ok($HN,$TipJar::MTA::MyDomain);
 
 print "testing dnsmx function\n";
-my @cpan = TipJar::MTA::dnsmx( 'cpan.org' );
-print "cpan.org MX: @cpan\n";
-ok(@cpan > 1);
+my @cpan = TipJar::MTA::dnsmx( 'yahoo.com' );
+print "yahoo.com MX: @cpan\n";
+ok(@cpan > 1); # this had been failing since cpan.org switched to only one mx
 
 print "$$ using /tmp/MTA_test_dir for basedir in test script\n";
 $TipJar::MTA::basedir = '/tmp/MTA_test_dir';

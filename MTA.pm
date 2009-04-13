@@ -56,7 +56,7 @@ use Fcntl ':flock';           # import LOCK_* constants
 $interval                = 17;
 $AgeBeforeDeferralReport = 4 * 3600;    # four hours
 
-$VERSION = '0.30';
+$VERSION = '0.31';
 
 sub VERSION {
     $_[1] or return $VERSION;
@@ -975,26 +975,34 @@ sub attempt {
             DEBUG and warn "requeing for @recips4";
             open ONE, ">$basedir/temp/RETRY.$$.$counter.ONE";
             print ONE "$ReturnAddress\n";
-            @recips4 > 1 and do {
+            if (@recips4 > 1 ){
                 open TWO, ">$basedir/temp/RETRY.$$.$counter.TWO";
                 print TWO "$ReturnAddress\n";
                 while (@recips4) {
                     print ONE ( ( shift @recips4 ) . "\n" );
                     @recips4 and print TWO ( ( shift @recips4 ) . "\n" );
                 }
-                print ONE "\n";
-                print TWO "\n";
+                print ONE "\nX-TipJar-Mta-Requeue-A-$dateheader";
+                print TWO "\nX-TipJar-Mta-Requeue-B-$dateheader";
                 while (<MESSAGE>) {
                     print ONE $_;
                     print TWO $_;
 
                 }
-                close ONE;
                 close TWO;
+                close ONE;
                 rename "$basedir/temp/RETRY.$$.$counter.ONE",
                   "$basedir/RETRY4a" . rand(98765);
                 rename "$basedir/temp/RETRY.$$.$counter.TWO",
                   "$basedir/RETRY4b" . rand(98765);
+
+            }else{
+                print ONE ( ( shift @recips4 ) . "\n\n" );
+                print ONE "X-TipJar-Mta-Singleton-Requeue-$dateheader";
+                print ONE (<MESSAGE>);
+                close ONE;
+                rename "$basedir/temp/RETRY.$$.$counter.ONE",
+                  "$basedir/".rand(99999)."RETRY4singleton" . rand(98765);
 
             };
             open MESSAGE, "<$basedir/temp/BODY.$$.$counter";
@@ -1006,7 +1014,7 @@ sub attempt {
                 for (@NoBounceRegexList) {
                     if ( $ReturnAddress =~ m/$_/ ) {
                         mylog "suppressing bounce to <$ReturnAddress>";
-                        last RECIP5;
+                        next RECIP5;
                     }
                 }
                 mylog "bouncing to <$ReturnAddress>";
@@ -1028,7 +1036,7 @@ the $MyDomain e-mail system received the error messages
 
 @emsgmap
 
-which indicates a permanent error.
+which indicate permanent errors.
 The first hundred and fifty lines of the message follow below:
 -------------------------------------------------------------
 EOF
@@ -1073,6 +1081,7 @@ EOF
     }
     my $linecount;
     my $bytecount;
+    print SOCK "X-Tipjar-Mta-Transmitted-By: $MyDomain\r\n" or die $!;
     while (<MESSAGE>) {
         $linecount++;
         $bytecount += length;
@@ -1380,31 +1389,31 @@ TipJar::MTA - outgoing SMTP with exponential random backoff.
 
 =head1 SYNOPSIS
 
-use TipJar::MTA '/var/spool/MTA';	# must be a writable -d
-# defaults to ./MTAdir
-$TipJar::MTA::interval='100';		# the default is 17
-$TipJar::MTA::TimeStampFrequency='35';	# the default is 200
-$TipJar::MTA::AgeBeforeDeferralReport=7000;	# default is 4 hours
-$TipJar::MTA::MyDomain='peanut.af.mil';	# defaults to `hostname`
-# bouces to certain matching addresses can be suppressed.
-@TipJar::MTA::NoBounceRegexList = map { qr/$_/} (
-'^MDA-bounce-recipient\@tipjar.com$',
-'^RAPNAP\+challenge\+sent\+to\+.+==.+\@pay2send.com$'
-);
-# And away we go,
-TipJar::MTA::run();			# logging to /var/spool/MTA/log/current
+ use TipJar::MTA '/var/spool/MTA';	# must be a writable -d
+ # defaults to ./MTAdir
+ $TipJar::MTA::interval='100';		# the default is 17
+ $TipJar::MTA::TimeStampFrequency='35';	# the default is 200
+ $TipJar::MTA::AgeBeforeDeferralReport=7000;	# default is 4 hours
+ $TipJar::MTA::MyDomain='peanut.af.mil';	# defaults to `hostname`
+ # bouces to certain matching addresses can be suppressed.
+ @TipJar::MTA::NoBounceRegexList = map { qr/$_/} (
+   '^MDA-bounce-recipient\@tipjar.com$',
+   '^RAPNAP\+challenge\+sent\+to\+.+==.+\@pay2send.com$'
+ );
+ # And away we go,
+ TipJar::MTA::run();			# logging to /var/spool/MTA/log/current
 
 alternately,
 
-use TipJar::MTA '/var/spool/MTA', 'nodns';  # we are sending to
-# a restricted set of domains
-# or using a smarthost
-%TipJar::MTA::SMTProutes = (
-SMARTHOST => 'smtp_outbound.internal',  # smarthost for forwarding, can be a list too
-'example.com' => # mail to example.com will be randomly routed through these three
-[qw/  smtp1.example.com smtp2.example.com backup-smtp.example.org /],
-'example.net' => 'bad-dog.example.net'  # all mail to example.net goes to bad-dog
-);
+ use TipJar::MTA '/var/spool/MTA', 'nodns';  # we are sending to
+ # a restricted set of domains
+ # or using a smarthost
+ %TipJar::MTA::SMTProutes = (
+  SMARTHOST => 'smtp_outbound.internal',  # smarthost for forwarding, can be a list too
+  'example.com' => # mail to example.com will be randomly routed through these three
+  [qw/  smtp1.example.com smtp2.example.com backup-smtp.example.org /],
+  'example.net' => 'bad-dog.example.net'  # all mail to example.net goes to bad-dog
+ );
 
 
 
@@ -1670,6 +1679,10 @@ MX and split into smaller groups when they are delayed at RCPT TO time.
 Yes this made things more complex, and it is not clear that it is bugless,
 so expect a 0.31 fairly soon.
 
+=item 0.31 13 April 2009
+
+Fixed a problem with requeueing messages with one recipient in 4XX situations.
+Added a new header to remember requeueing times
 
 =back
 
