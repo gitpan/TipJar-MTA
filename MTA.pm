@@ -29,6 +29,7 @@ use vars qw/
   @NoBounceRegexList
   $MaxActiveKids
   $FourErrCacheLifetime
+  $BindAddress
   %SMTProutes
   /;
 
@@ -56,7 +57,7 @@ use Fcntl ':flock';           # import LOCK_* constants
 $interval                = 17;
 $AgeBeforeDeferralReport = 4 * 3600;    # four hours
 
-$VERSION = '0.31';
+$VERSION = '0.32';
 
 sub VERSION {
     $_[1] or return $VERSION;
@@ -195,9 +196,12 @@ sub recursive_immed($) {       #  "$qdir/$this";
     for $e (@rmdirs) { rmdir $e or mylog "Can't rmdir $e: $!" }
 }
 
+{ 
+  # static variables 
+  my $string = 'a'; 
+  my $outboundfname = 'a';
 sub run() {
 
-    my $string if 0;
     INIT { $string = 'a' }
     undef $Recipient;
 
@@ -303,9 +307,7 @@ sub run() {
     # process new files if any
     opendir BASEDIR, $basedir;
     my @entries = readdir BASEDIR;
-    my $outboundfname if 0;
     my $outfile;
-    INIT { $outboundfname = 'a' }
     for my $file (@entries) {
         -f "$basedir/$file" or next;
         -s "$basedir/$file" or next;
@@ -410,7 +412,7 @@ sub run() {
     }
 
     exit;
-}
+}}; # end sub run and enclosing scope
 
 # only one active message per process.
 # (MESSAGE, $ReturnAddress, $Recipient) are all global.
@@ -452,7 +454,7 @@ sub purgedir($) {
         my @statresult = stat(_);
         my $mtime      = $statresult[9];
         if ( ( $now - $mtime ) > ( 4 * 60 * 60 ) ) {
-            unlink $_;
+            unlink "$dir/$_" ;
             $purgecount++;
         }
     }
@@ -791,6 +793,11 @@ sub attempt {
         socket( SOCK, PF_INET, SOCK_STREAM, getprotobyname('tcp') )
           or die "$$ socket: $!";
 
+        if (defined $BindAddress){
+	   bind(SOCK, sockaddr_in(0, inet_aton($BindAddress)))
+              or die "could not bind to $BindAddress: $!";
+        };
+
         connect( SOCK, $paddr ) || next;
         mylog "connected to $Peerout";
         my $oldfh = select(SOCK);
@@ -962,7 +969,7 @@ sub attempt {
         #		goto ReQueue;
         #  	};
 
-        my $counter = $ReQ::counter++;
+        my $counter = $ReQ::counter++; INIT { $ReQ::counter='a' };
         open BODY, ">$basedir/temp/BODY.$$.$counter";
         eval "END{ unlink '$basedir/temp/BODY.$$.$counter'  }";
         while (<MESSAGE>) {
@@ -1239,9 +1246,13 @@ EOF
 
 sub requeue {
     my $message = shift;
+    -f $$message or do {
+        mylog "message $$message is missing, probably already reQd.";
+        return;
+    };
+    my @stat = stat(_);
     my $reason  = shift;
     my ( $fdir, $fname ) = $$message =~ m#^(.+)/([^/]+)$#;
-    my @stat = stat($$message);
     my $age  = $time - $stat[9];
     mylog "reQing $$message which is $age seconds old";
     DEBUG and warn "reQing $$message which is $age seconds old";
@@ -1683,6 +1694,21 @@ so expect a 0.31 fairly soon.
 
 Fixed a problem with requeueing messages with one recipient in 4XX situations.
 Added a new header to remember requeueing times
+
+=item 0.32 24 April 2009
+
+Two patches from RT queue, one quite old.
+
+Thanks to Tim Esselens, the long-standing bug
+about error codes not actually expiring after
+four hours like they are supposed to has been repaired
+
+Thanks to Jose Luis Martinez, The address to choose for the local end of sockets
+is now configurable through a global variable C<$TipJar::MTA::BindAddress>,
+also a situation that resulted in false bounce-as-undeliverables has been mitigated.
+
+C<my ... if 0> style statics have been refactored into outer scopes, and other
+style points causing warnings under 5.10 have been addressed as well.
 
 =back
 

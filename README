@@ -20,7 +20,9 @@ week.
 
 New with version 0.30, multiple recipients are multiplexed into
 queued message objects rather than doing qmail-style one-recipient-only
-sending. (and with version 0.31, this works right.)
+sending. (and with version 0.31, this works right.) (And with version 0.32,
+some other things that haven't been working right should start working 
+right too.)
 
 use TipJar::MTA::queue to add messages for sending, or simply
 link your properly formatted message into the working directory,
