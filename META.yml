@@ -1,15 +1,23 @@
 --- #YAML:1.0
-name:                TipJar-MTA
-version:             0.32
-abstract:            outgoing SMTP with exponential random backoff.
-license:             ~
-author:              
+name:               TipJar-MTA
+version:            0.33
+abstract:           outgoing SMTP with exponential random backoff.
+author:
     - David Nicol <davidnico@cpan.org>
-generated_by:        ExtUtils::MakeMaker version 6.44
-distribution_type:   module
-requires:     
-    dateheader:                    0
-    Net::DNS:                      0.38
+license:            unknown
+distribution_type:  module
+configure_requires:
+    ExtUtils::MakeMaker:  0
+build_requires:
+    ExtUtils::MakeMaker:  0
+requires:
+    dateheader:  0
+    Net::DNS:    0.38
+no_index:
+    directory:
+        - t
+        - inc
+generated_by:       ExtUtils::MakeMaker version 6.50
 meta-spec:
-    url:     http://module-build.sourceforge.net/META-spec-v1.3.html
-    version: 1.3
+    url:      http://module-build.sourceforge.net/META-spec-v1.4.html
+    version:  1.4

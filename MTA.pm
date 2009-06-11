@@ -31,6 +31,7 @@ use vars qw/
   $FourErrCacheLifetime
   $BindAddress
   %SMTProutes
+  $PostDataTrouble
   /;
 
 $ConRetryDelay        = 17 * 60;
@@ -57,7 +58,7 @@ use Fcntl ':flock';           # import LOCK_* constants
 $interval                = 17;
 $AgeBeforeDeferralReport = 4 * 3600;    # four hours
 
-$VERSION = '0.32';
+$VERSION = '0.33';
 
 sub VERSION {
     $_[1] or return $VERSION;
@@ -434,6 +435,7 @@ sub newmessage($) {
     chomp( $Recipient     = <MESSAGE> );
     @Recipients = split / +/, $Recipient;
     $InitialRecipCount = @Recipients;
+	undef $PostDataTrouble;
     bless \$messageID;
 }
 
@@ -879,7 +881,7 @@ sub attempt {
     $ReturnAddress =~ s/^.*<//;
     $ReturnAddress =~ s/>.*$//;
 
-    $line = getresponse "MAIL FROM: <$ReturnAddress>" or goto TryAgain;
+    $line = getresponse "MAIL FROM:<$ReturnAddress>" or goto TryAgain;
     mylog "$line";
     unless ( $line =~ /^[2]/ ) {
         mylog "peer not happy with return address: [$line]";
@@ -914,7 +916,7 @@ sub attempt {
         s/^.*<//;
         s/>.*$//;
 
-        $line = getresponse "RCPT TO: <$_>" or goto TryAgain;
+        $line = getresponse "RCPT TO:<$_>" or goto TryAgain;
         if ( $line =~ /^2/ ) {
             push @GoodR, $_;
         }
@@ -1061,7 +1063,7 @@ EOF
         open MESSAGE, "<$basedir/temp/BODY.$$.$counter";
     }
 
-    $Post::Data::Trouble and goto GoodDelivery;
+    $PostDataTrouble and goto GoodDelivery;
 
     # DATA_TRANSACTION:
     $Recipient = "@GoodR";
@@ -1082,7 +1084,7 @@ EOF
             goto TryAgain;
         }
         @recips4             = @GoodR;
-        $Post::Data::Trouble = 1;
+        $PostDataTrouble = 1;
         goto ReQueueFours;
 
     }
@@ -1117,8 +1119,8 @@ EOF
         mylog "peer not happy with message body: [$line]";
         if ( $line =~ /^4/ ) {
             @recips4             = @GoodR;
-            $Post::Data::Trouble = 1;
-            goto ReQueueFours;
+            $PostDataTrouble = 1;
+            @recips4 > 1 and goto ReQueueFours;
             mylog "requeueing";
             goto ReQueue;
         }
@@ -1709,6 +1711,12 @@ also a situation that resulted in false bounce-as-undeliverables has been mitiga
 
 C<my ... if 0> style statics have been refactored into outer scopes, and other
 style points causing warnings under 5.10 have been addressed as well.
+
+=item 0.33 11 June 2009
+
+Thanks again JLMARTINEZ for bug #45702 and fix for it
+
+We no longer send spaces after colons for compliance with RFC 5321 section 3.3.
 
 =back
 
