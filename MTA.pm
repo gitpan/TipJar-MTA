@@ -5,7 +5,7 @@ use warnings;
 use Carp;
 sub mylog(@);
 use POSIX qw/strftime/;
-
+  my $ONCE = 0;
 BEGIN {
     if ( $ENV{TJMTADEBUG} ) {
         eval 'sub DEBUG(){1}';
@@ -58,7 +58,7 @@ use Fcntl ':flock';           # import LOCK_* constants
 $interval                = 17;
 $AgeBeforeDeferralReport = 4 * 3600;    # four hours
 
-$VERSION = '0.33';
+$VERSION = '0.34';
 
 sub VERSION {
     $_[1] or return $VERSION;
@@ -113,7 +113,8 @@ sub import {
         };
     }
     else {
-        eval 'use Net::DNS';
+        eval 'use Net::DNS; 1' or die "failed to load Net::DNS: $@";
+		
         $res   = Net::DNS::Resolver->new;
         *dnsmx = \&_dnsmx;
     }
@@ -123,7 +124,7 @@ sub import {
 
 }
 
-$LogToStdout = 0;
+$LogToStdout = 1;
 
 {
     my $LogTime = 0;
@@ -189,6 +190,7 @@ sub recursive_immed($) {       #  "$qdir/$this";
             }
             else {
                 mylog "UNLINKING NONFILE NONDIR $abs";
+				# abs hasn't been opened, don't need to close it
                 unlink $abs or mylog "UNLINK FAILED: $!";
             }
         }
@@ -201,6 +203,7 @@ sub recursive_immed($) {       #  "$qdir/$this";
   # static variables 
   my $string = 'a'; 
   my $outboundfname = 'a';
+
 sub run() {
 
     INIT { $string = 'a' }
@@ -247,7 +250,7 @@ sub run() {
       or mkdir "$basedir/temp", 0770
       or die "could not mkdir $basedir/temp: $!";
 
-    {    # only one MTA at a time, so we can run this
+    $ONCE or do {    # only one MTA at a time, so we can run this
 
         # from cron
         open PID, ">>$basedir/temp/MTApid";    # "touch" sort of
@@ -267,7 +270,7 @@ sub run() {
         print PID "$$\n";
         flock PID, LOCK_UN;
         close PID;
-    }
+    };
 
     # immediate dir contains reprioritized deferred objects
     -d "$basedir/immediate"
@@ -290,6 +293,7 @@ sub run() {
         }
 
         # new child drops out of the waiting loop
+		$ONCE and last;
         $LastChild = fork or last;
         $ActiveKids++;
         if ($OnlyOnce) {
@@ -301,7 +305,7 @@ sub run() {
             $slept += sleep( 1 + $interval - $slept );
         }
     }
-
+    my $file;
     $time = time;
     DEBUG and warn "queuerunner launched at " . localtime $time;
 
@@ -309,7 +313,7 @@ sub run() {
     opendir BASEDIR, $basedir;
     my @entries = readdir BASEDIR;
     my $outfile;
-    for my $file (@entries) {
+    for $file (@entries) {
         -f "$basedir/$file" or next;
         -s "$basedir/$file" or next;
         mylog "processing new message file $file";
@@ -328,7 +332,7 @@ sub run() {
             next;
         }
         eval
-" END{ DEBUG and warn q{ unlinking $outfile }; unlink q{$outfile} or mylog q{CRITICAL: could not unlink $outfile}} ";
+" END{ close MESSAGE0; DEBUG and warn q{ unlinking $outfile }; unlink q{$outfile} or mylog q{CRITICAL: could not unlink $outfile}} ";
 
         my @MessData = (<MESSAGE0>);
         mylog scalar(@MessData), "lines of message data";
@@ -376,8 +380,9 @@ sub run() {
     opendir BASEDIR, "$basedir/immediate"
       or die "could not open immediate dir: $!";
     @entries = readdir BASEDIR;
-    for my $file (@entries) {
+    for $file (@entries) {
         my $M = newmessage "$basedir/immediate/$file" or next;
+		DEBUG and warn "created message object $M for immediate message file $file";
         $M->attempt();    # will skip or requeue or delete
         undef $Recipient;
     }
@@ -398,6 +403,7 @@ sub run() {
             }
             unless ( -d "$qdir/$this" ) {
                 mylog "UNLINKING NONFILE NONDIR $qdir/$this";
+				# hasn't been opened no need to close it
                 unlink "$qdir/$this" or mylog "UNLINK FAILED: $!";
                 next;
             }
@@ -412,8 +418,13 @@ sub run() {
         -d $qdir or last;
     }
 
-    exit;
-}}; # end sub run and enclosing scope
+    $ONCE or exit;
+}  # end sub run
+
+  sub once { $ONCE = 1; run}
+
+
+}; # end sub run and enclosing scope
 
 # only one active message per process.
 # (MESSAGE, $ReturnAddress, $Recipient) are all global.
@@ -426,6 +437,7 @@ sub newmessage($) {
     -s $messageID or do {
 
         # eliminate freeze on zero-length message files
+		# hasn't been opened no need to close it
         unlink $messageID;
         return undef;
     };
@@ -456,7 +468,7 @@ sub purgedir($) {
         my @statresult = stat(_);
         my $mtime      = $statresult[9];
         if ( ( $now - $mtime ) > ( 4 * 60 * 60 ) ) {
-            unlink "$dir/$_" ;
+            unlink "$dir/$_" or mylog "problem unlinking $dir/$_: $!";
             $purgecount++;
         }
     }
@@ -498,7 +510,7 @@ sub concachetest($) {
     ( time() - $SR[9] ) < $ConRetryDelay and return 1;
 
     mylog "ready to try connecting to $_[0] again";
-    unlink "$basedir/conerror/$_[0]";
+    unlink "$basedir/conerror/$_[0]" or mylog "trouble unlinking $basedir/conerror/$_[0]: $!";
 
     undef;
 }
@@ -536,7 +548,7 @@ sub cache4test($) {
     if ( ( time() - $ctime ) > $FourErrCacheLifetime ) {
 
         # 4-file is more than seven minutes old
-        unlink "$basedir/4error/$host/$user";
+        unlink "$basedir/4error/$host/$user" or mylog "trouble unlinking $basedir/4error/$host/$user: $!";
         return undef;
     }
     mylog "4cached ", $line;
@@ -577,7 +589,7 @@ sub cache5test($) {
     if ( ( time() - $ctime ) > ( 4 * 60 * 60 ) ) {
 
         # 5-file is more than 4 hours old
-        unlink "$basedir/5error/$host/$user";
+        unlink "$basedir/5error/$host/$user" or mylog "trouble unlinking $basedir/5error/$host/$user: $!";
         return undef;
     }
     mylog "5cached ", $line;
@@ -598,6 +610,19 @@ use Socket;
 sub _dnsmx($) {
 
     my $name = shift;
+	
+            my $host = $name;
+            if ( exists $SMTProutes{$host} ) {
+                ref( $SMTProutes{$host} )
+                  and return Scramble( $SMTProutes{$host} );
+                return ($SMTProutes{$host});
+            }
+            if ( exists $SMTProutes{SMARTHOST} ) {
+                ref( $SMTProutes{SMARTHOST} )
+                  and return Scramble( $SMTProutes{$host} );
+                return ($SMTProutes{SMARTHOST});
+            };
+	
     my @mx = map { $_->exchange } mx( $res, $name );
     @mx or return ($name);
 
@@ -744,7 +769,9 @@ sub attempt {
 
     unless ( ($Domain) = $Recipient =~ /\@([^\s>]+)/ ) {
         mylog "no domain in recipient [$Recipient], discarding message";
-        unlink $$message;
+		close MESSAGE;
+        unlink $$message or mylog "trouble unlinking $$message: $!";
+
         return;
     }
     $Domain =~ y/A-Z/a-z/;
@@ -819,9 +846,10 @@ sub attempt {
     $SIG{ALRM} = sub {
         mylog 'TIMEOUT -- caught alarm signal in attempt()';
         $message->requeue("timed out during SMTP interaction");
-        unlink $$message;    # "true"
+		close MESSAGE;
+        unlink $$message or mylog "trouble unlinking $$message: $!";
         $onioning and unlink "$basedir/domain/$Domain.$$";
-        exit;
+        $ONCE or exit;
     };
 
     # expect 220
@@ -973,7 +1001,7 @@ sub attempt {
 
         my $counter = $ReQ::counter++; INIT { $ReQ::counter='a' };
         open BODY, ">$basedir/temp/BODY.$$.$counter";
-        eval "END{ unlink '$basedir/temp/BODY.$$.$counter'  }";
+        eval "END{ close BODY; unlink '$basedir/temp/BODY.$$.$counter'  }";
         while (<MESSAGE>) {
             print BODY $_;
         }
@@ -1055,6 +1083,7 @@ EOF
                     print BOUNCE $lin;
                 }
                 close BOUNCE;
+				mylog "renaming temp file to immediate $filename";
                 rename "$basedir/temp/$filename",
                   "$basedir/immediate/$filename";
             }
@@ -1109,7 +1138,7 @@ EOF
             goto TryAgain;
         }
     }
-
+    close MESSAGE;
     # print SOCK ".\r\n";
     # expect 250
     mylog "$linecount lines ($bytecount chars) of message data, sending dot"
@@ -1191,7 +1220,8 @@ EOF
 
   GoodDelivery:
     undef $Recipient;
-    unlink $$message;    # "true"
+	close MESSAGE; # windows can't unlink an open file
+    unlink $$message or die "FAILED TO UNLINK $$message: $!";    # "true"
 
     alarm 0;
     if ($onioning) {
@@ -1231,8 +1261,9 @@ EOF
             $M or next;
             $M->attempt();
             undef $Recipient;
-        }
-        unlink "$basedir/domain/$Domain.$$";
+        };
+		close DOMAINLIST;
+        unlink "$basedir/domain/$Domain.$$" or mylog "trouble unlinking DOMAINLIST domain/$Domain.$$: $!";
         $onioning--;
     }
     else {
@@ -1293,7 +1324,8 @@ EOF
         rename "$basedir/temp/$filename", "$basedir/immediate/$filename";
 
       unlinkme:
-        unlink $$message;
+	    close MESSAGE;
+        unlink $$message or mylog "trouble unlinking $$message: $!";
 
         # clean up per-domain queue
         DLpurge;
@@ -1376,7 +1408,7 @@ sub DLpurge() {
     }
 
     close DOMAINLIST;
-    unlink "$basedir/domain/$Domain$$";
+    unlink "$basedir/domain/$Domain$$" or mylog "trouble unlinking domainlist $Domain$$: $!";
 }
 
 sub DLsave($) {
@@ -1717,6 +1749,11 @@ style points causing warnings under 5.10 have been addressed as well.
 Thanks again JLMARTINEZ for bug #45702 and fix for it
 
 We no longer send spaces after colons for compliance with RFC 5321 section 3.3.
+
+=item 0.34 Spring 2010
+
+we now have a C<TipJar::MTA::once> subroutine that goes through the
+queue once then returns, also some modifications for working well on Windows
 
 =back
 
